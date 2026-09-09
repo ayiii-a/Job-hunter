@@ -90,6 +90,14 @@ def cmd_profile_check(args: argparse.Namespace) -> int:
         _err(f"找不到 {config.TARGET_PROFILE_PATH}——跑一次 agent init 从模板生成")
         failed = True
 
+    # 结构校验查不出「一个字没改」——模板本身是合法的
+    stale = config.unchanged_from_template()
+    if stale:
+        print()
+        for p in stale:
+            _warn(f"{p.name} 和模板一字不差，还没改过")
+        _warn("模板里的默认值多半和你的实际情况相反，会让筛选反着工作")
+
     return 1 if failed else 0
 
 

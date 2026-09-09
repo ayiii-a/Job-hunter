@@ -188,6 +188,69 @@ def test_target_profile_requires_location_or_remote():
     assert any("locations" in e for e in rep.errors)
 
 
+def test_tier_title_missing_from_include_is_an_error():
+    # 在 tier 里加了岗位却忘了加进 titles_include，它会被第一道闸滤掉——
+    # 你以为把它排进了主攻方向，实际它永远不会出现
+    rep = profile.validate_target_profile(
+        {
+            "titles_include": ["AI Engineer"],
+            "remote_ok": True,
+            "title_tiers": {"tier1": ["AI Engineer", "LLM Engineer"]},
+        }
+    )
+    assert not rep.ok
+    assert any("LLM Engineer" in e for e in rep.errors)
+
+
+def test_tier_titles_matching_include_are_fine():
+    rep = profile.validate_target_profile(
+        {
+            "titles_include": ["AI Engineer", "LLM Engineer"],
+            "titles_exclude": ["Senior"],
+            "remote_ok": True,
+            "title_tiers": {"tier1": ["AI Engineer"], "tier2": ["LLM Engineer"]},
+        }
+    )
+    assert rep.ok
+    assert rep.stats["tiers"] == 2
+
+
+def test_tier_match_is_case_insensitive():
+    rep = profile.validate_target_profile(
+        {
+            "titles_include": ["AI Engineer"],
+            "remote_ok": True,
+            "title_tiers": {"tier1": ["ai engineer"]},
+        }
+    )
+    assert rep.ok
+
+
+def test_unverified_stem_opt_is_flagged():
+    rep = profile.validate_target_profile(
+        {
+            "titles_include": ["AI Engineer"],
+            "titles_exclude": ["Senior"],
+            "remote_ok": True,
+            "visa": {"stem_opt_eligible": "unverified"},
+        }
+    )
+    assert rep.ok
+    assert any("stem_opt_eligible" in w for w in rep.warnings)
+
+
+def test_sponsorship_without_hard_fail_phrases_is_flagged():
+    rep = profile.validate_target_profile(
+        {
+            "titles_include": ["AI Engineer"],
+            "titles_exclude": ["Senior"],
+            "remote_ok": True,
+            "visa": {"needs_sponsorship_eventually": True},
+        }
+    )
+    assert any("hard_fail_phrases" in w for w in rep.warnings)
+
+
 def test_target_profile_remote_ok_satisfies_location():
     rep = profile.validate_target_profile(
         {"titles_include": ["SWE"], "remote_ok": True, "titles_exclude": ["Intern"]}
@@ -251,6 +314,27 @@ def test_bootstrap_never_overwrites_existing(tmp_path, monkeypatch):
 
     assert config.bootstrap_configs() == []
     assert config.read_text(target) == "mine: precious"
+
+
+def test_unchanged_from_template_is_detected(tmp_path, monkeypatch):
+    # 一个字没改的配置结构上完全合法，结构校验永远查不出来
+    template = tmp_path / "t.example.yaml"
+    target = tmp_path / "t.yaml"
+    template.write_text("titles_include: [SWE]\n", encoding="utf-8")
+    monkeypatch.setattr(config, "CONFIG_TEMPLATES", ((template, target),))
+
+    config.bootstrap_configs()
+    assert config.unchanged_from_template() == [target]
+
+    config.write_text(target, "titles_include: [ML Engineer]\n")
+    assert config.unchanged_from_template() == []
+
+
+def test_unchanged_from_template_ignores_missing_files(tmp_path, monkeypatch):
+    template = tmp_path / "t.example.yaml"
+    template.write_text("a: 1", encoding="utf-8")
+    monkeypatch.setattr(config, "CONFIG_TEMPLATES", ((template, tmp_path / "nope.yaml"),))
+    assert config.unchanged_from_template() == []
 
 
 def test_bootstrap_is_idempotent(tmp_path, monkeypatch):

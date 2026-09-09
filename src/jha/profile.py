@@ -192,7 +192,8 @@ def validate_master_profile(data: dict[str, Any]) -> ValidationReport:
 def validate_target_profile(data: dict[str, Any]) -> ValidationReport:
     rep = ValidationReport()
 
-    if not (data.get("titles_include") or []):
+    include = data.get("titles_include") or []
+    if not include:
         rep.errors.append("titles_include 为空——规则初筛没有正向关键词就等于不过滤")
     if not (data.get("titles_exclude") or []):
         rep.warnings.append(
@@ -204,10 +205,36 @@ def validate_target_profile(data: dict[str, Any]) -> ValidationReport:
             "不设的话单家公司就可能涌进上百个不相关地点的岗位"
         )
 
+    # titles_include 是硬过滤，title_tiers 只排优先级。
+    # 在 tier 里加了岗位却忘了加进 titles_include，那个岗位会被第一道闸直接
+    # 滤掉——你以为把它排进了主攻方向，实际它根本不会出现。
+    tiers = data.get("title_tiers") or {}
+    included = {t.lower() for t in include}
+    for tier_name, titles in tiers.items():
+        for title in titles or []:
+            if title.lower() not in included:
+                rep.errors.append(
+                    f"title_tiers.{tier_name} 里的「{title}」不在 titles_include 中，"
+                    "会被规则初筛直接滤掉"
+                )
+
+    visa = data.get("visa") or {}
+    if visa.get("stem_opt_eligible") == "unverified":
+        rep.warnings.append(
+            "visa.stem_opt_eligible 还没确认。12 个月和 36 个月是两种求职策略——"
+            "只有 12 个月的话第一年就得盯能办 H-1B 的公司，去 ISSO 问一下 CIP code"
+        )
+    if visa.get("needs_sponsorship_eventually") and not (visa.get("hard_fail_phrases") or []):
+        rep.warnings.append(
+            "需要担保却没设 hard_fail_phrases——明说不担保的岗位会照常推给你，白花时间"
+        )
+
     rep.stats = {
-        "titles_include": len(data.get("titles_include") or []),
+        "titles_include": len(include),
         "titles_exclude": len(data.get("titles_exclude") or []),
+        "tiers": len(tiers),
         "locations": len(data.get("locations") or []),
+        "locations_exclude": len(data.get("locations_exclude") or []),
         "deal_breakers": len(data.get("deal_breakers") or []),
     }
     return rep

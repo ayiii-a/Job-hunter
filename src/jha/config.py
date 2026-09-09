@@ -52,6 +52,22 @@ def bootstrap_configs() -> list[Path]:
     return created
 
 
+def unchanged_from_template() -> list[Path]:
+    """列出内容和模板一模一样、即还没动过的配置文件。
+
+    结构校验查不出这种问题：模板本身是合法的，所以一个字没改也会「通过」。
+    而模板里的默认值往往正好是错的（例如 titles_exclude 里的 New Grad
+    会把应届岗位全滤掉），于是你会以为筛选在工作，其实它在反着筛。
+    """
+    stale: list[Path] = []
+    for template, target in CONFIG_TEMPLATES:
+        if not (template.exists() and target.exists()):
+            continue
+        if read_text(target) == read_text(template):
+            stale.append(target)
+    return stale
+
+
 def force_utf8_stdio() -> None:
     """把 stdout/stderr 钉成 utf-8。
 
