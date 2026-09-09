@@ -32,6 +32,7 @@
 | 浏览器自动化 | Playwright（persistent context 复用登录态） | Chrome 插件 | 预填表单用；不要让 agent 保存密码 |
 | 通知 | Telegram Bot / Slack webhook | 邮件 | 面试邀请需要即时推送 |
 | 前端/视图 | 先 CLI + Google Sheet 同步 | Streamlit / 简单 Web | 第一版不要写前端，Sheet 就是 tracking 表 |
+| 架构 | **Agent loop + tool use** | 确定性管线 | 模型决定「做什么」，Phase 0/1 的确定性代码决定「怎么做」。安全属性靠**工具注册表**保证——不存在的工具调不出来 |
 | 平台 | Windows（本机） | — | Python 在 Windows 上默认编码是 **cp1252**，所有 `open()` 必须显式 `encoding='utf-8'`，入口设 `PYTHONIOENCODING=utf-8`。JD 文本含大量非 ASCII（实测有日文标题、smart quotes、em-dash） |
 
 **总体架构（数据流）**
@@ -338,6 +339,12 @@ applied → oa → phone_screen → interview_loop → onsite → offer
 
 ### Phase 4.5 — 表单预填（可选，**不在关键路径上**）
 
+> **注**：这一节原来写的是「做成半自动脚本而不是自主 agent」。项目已改为
+> agent loop 架构，但这句话的实质没变、只是位置变了——预填仍然是**确定性代码**
+> 定位字段、LLM 只起草文本答案，只不过它现在是 agent 可以调用的一个工具，
+> 而不是一个独立脚本。**提交键仍然由人按**：`submit_application` 这个工具
+> 在架构上不存在。
+>
 > **先想清楚要不要做。** 手填一份 Greenhouse 表单大约 4 分钟，每天 8 份是 32 分钟。而给 3 个 ATS 做 Playwright 预填、处理 CAPTCHA / 登录页 / 两步验证的各种边缘情况，是 20 小时以上的工程量，而且**永久脆弱**（ATS 一改版就得修）。
 >
 > **这是全项目 ROI 最差的模块。** 建议等你连续两周真的每天投满 8 家、确认这 30 分钟确实是瓶颈之后再做。在那之前，同样的时间花在内推和面试准备上，回报高一个量级。
@@ -457,6 +464,8 @@ applied → oa → phone_screen → interview_loop → onsite → offer
 | 11 | `applications.status` | **物化缓存**；`events` 是唯一真相源 | 不建议改 |
 | 12 | 表单预填 | **移出关键路径**，确认是瓶颈后再做 | 连续两周真的投满 8 家之后 |
 | 13 | 内推 | 投递前必查 `contacts`，有人就先要内推 | 不建议改 |
+| 14 | 编排方式 | **Agent loop + tool use**（2026-09 决定） | 见下方说明 |
+| 15 | 安全边界 | **工具注册表**，不是 prompt | 不建议改 |
 
 ---
 
@@ -466,7 +475,8 @@ applied → oa → phone_screen → interview_loop → onsite → offer
 |---|---|---|
 | 简历幻觉 | 面试翻车、信誉受损 | ID 选材 + **确定性**校验器 + 人工审核 |
 | 邮件误判把面试邀请当拒信 | 错过面试 | 邀请类永远人工确认 + 即时推送 |
-| 邮件 prompt injection | agent 被诱导执行操作 | 只读（代码层面无写路径）+ 不点链接 + 隔离 prompt |
+| 邮件 prompt injection | agent 被诱导执行操作 | **工具注册表里没有发信/点链接/提交的工具**——被诱导也调不出来。加上隔离 prompt、把邮件正文标为不可信数据 |
+| Agent loop 跑偏烧钱 | 循环次数由模型决定，可能失控 | 硬预算：`Budget` 限制 LLM 调用次数和 token 上限，超了就停；每次调用写 `llm_calls`，`agent spend` 按用途拆账 |
 | 岗位源 API 变更 | 抓取静默失败 | 冒烟测试 + **失败告警从 Phase 1 就要有**（不能等 Phase 7——你会以为"最近没新岗位"，实际适配器挂了两周） |
 | 申请被 ATS 静默丢弃 | 白投，而且你不知道 | **投递后 24h 无确认邮件即告警**（Phase 4）——原来只有预防没有检测 |
 | 被 ATS 识别为自动化 | 申请被静默丢弃 | 人点提交 + 正常浏览器 + 限速限量 |
@@ -492,6 +502,36 @@ applied → oa → phone_screen → interview_loop → onsite → offer
 > **原计划写的是 5–6 周，那个数字不诚实。** 按业余时间算，光母简历就要 1–2 周，简历渲染和邮件接入各有自己的坑，**9–12 周是更真实的估计**。
 >
 > 这不是"要更努力"的问题，是排期本身要改：按 5–6 周排，你会在第 3 周就开始砍质量——而这个项目里最不该砍质量的恰恰是最前面的母简历。
+
+---
+
+## 6.5 Agent loop 架构（2026-09 决定）
+
+项目采用 **agent loop + tool use**，而不是一串固定顺序的脚本。
+邮件定时检查、tracking 表自动更新、每日岗位收集与 feed、简历生成，
+都由 agent 循环编排。
+
+但路线图的几条原则一条都没有放弃——**它们的实现位置从 prompt 移到了工具注册表**：
+
+| 原则 | 改成 agent loop 之后靠什么保证 |
+|---|---|
+| 提交由人点 | 不存在 `submit_application` 工具 |
+| 邮件只读 | 不存在 `send_email` / `reply` 工具；不点链接 = 不存在 `open_url` |
+| events 永不删改 | 不存在 `delete_event`；数据库触发器也拦 |
+| 不编造简历 | 选材工具的 schema 只接受 bullet **id**，不接受文本 |
+
+**为什么这比写在 prompt 里可靠**：模型可能被 JD 或邮件正文里的注入内容诱导，
+但它调不出不存在的函数。加新工具之前先问一句：**这个能力被滥用的最坏后果是什么。**
+
+三档权限：
+
+- `READ` —— 只读本地数据，随便调
+- `WRITE` —— 写本地库，允许自动执行。**理由是 events 追加式可纠错**：
+  误写能靠追加 `status_override` 事件修回来，代价低
+- `GATED` —— 外发或不可逆，必须**单次**批准，不延续到下次
+
+代码在 `src/jha/agent/`：`tools.py`（注册表 + 安全边界）、`loop.py`（主循环）、
+`client.py`（调用记账 + 预算）。命令：`agent run` / `agent tools` / `agent spend`。
 
 ---
 

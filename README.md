@@ -6,7 +6,7 @@
 > 所以 `config/*.yaml`、`.env`、`data/` 全部在 `.gitignore` 里，仓库中只保留 `*.example.yaml`。
 > 代价是简历没有 git 版本历史——要的话自己另外备份（Phase 7 会加每日备份）。
 
-当前进度：**Phase 0（骨架）+ Phase 1（岗位监控）完成**。
+当前进度：**Phase 0（骨架）+ Phase 1（岗位监控）+ Agent loop 基座完成**。
 JD 分析、简历定制、邮件、面试模拟尚未实现。
 
 ---
@@ -94,6 +94,9 @@ cp .env.example .env
 | `agent fetch` | 抓取目标公司的新岗位（Phase 1） |
 | `agent jobs list` | 列出抓到的岗位，按档位排序 |
 | `agent jobs show <id>` | 看单个岗位和 JD 全文 |
+| `agent run "<任务>"` | 跑 agent loop，模型自己决定调哪些工具 |
+| `agent tools` | 列出可用工具、权限档，以及**刻意不存在**的工具 |
+| `agent spend` | 按用途拆 LLM 成本 |
 
 `agent fetch` 的开关：`--explain` 显示初筛丢弃原因和样本（调过滤条件全靠它）、
 `--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Telegram。
@@ -152,6 +155,36 @@ Greenhouse 的 `updated_at` 再省一层：第二次抓取时详情请求降到 
 
 ---
 
+## Agent loop
+
+模型决定**做什么**，Phase 0/1 的确定性代码决定**怎么做**。工具体内就是已经
+测过的那些函数——抓取、初筛、状态推导。模型不重新实现它们，只调用它们，
+所以跑偏的上界是「调错了工具」，而不是「算错了结果」。
+
+```bash
+./.venv/Scripts/agent.exe run "看看今天有什么新岗位，有内推路径的排前面"
+./.venv/Scripts/agent.exe run --read-only "巡检：抓取器有没有静默失败"
+```
+
+### 安全边界是工具注册表，不是 prompt
+
+路线图那几条原则（提交由人点、邮件只读、不点链接）现在靠**不存在对应的工具**
+来保证。模型可能被 JD 或邮件正文里的注入内容诱导，但它调不出不存在的函数。
+
+跑 `agent tools` 会把这份「刻意不存在」的清单一起打印出来——它是安全边界，
+不是待办事项。**加新工具之前先问：这个能力被滥用的最坏后果是什么。**
+
+三档权限：`READ` 随便调；`WRITE` 写本地库、允许自动执行（因为 events
+追加式可纠错）；`GATED` 外发动作，必须**单次**批准，不延续到下次。
+
+### 预算是硬的
+
+循环次数由模型决定，所以上限必须由代码给。`Budget` 限制 LLM 调用次数和
+token 上限，超了就停并汇报已完成的部分。每次调用写 `llm_calls` 表，
+`agent spend` 按用途拆账。
+
+---
+
 ## 骨架里的两个关键设计
 
 这两条是路线图的架构原则，Phase 0 把它们落成了**代码强制**而不是口头约定。
@@ -191,6 +224,7 @@ Windows 上 Python 默认编码是 cp1252，而 JD 文本里满是非 ASCII（�
 ```
 config/     *.example.yaml 进 git；同名的 *.yaml 是你的真实内容，不进 git
 src/jha/    schema.sql, db.py, status.py, profile.py, cli.py
+  agent/    tools.py（注册表=安全边界）, loop.py（主循环）, client.py（记账+预算）
   sources/  三个 ATS 适配器 + RawJob 归一化
   tools/    resolve_ats.py
             filters.py（规则初筛）, ingest.py（抓取管线）, notify.py

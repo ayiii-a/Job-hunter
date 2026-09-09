@@ -58,6 +58,32 @@ def _template_leftovers(data: Any) -> set[str]:
     return {m for m in _TEMPLATE_MARKERS if m in blob}
 
 
+def _has_metrics(bullet: dict[str, Any]) -> bool:
+    """这条 bullet 有没有量化结果。
+
+    `metrics` 接受三种写法：
+        false      —— 没有
+        true       —— 有，数字已经写进 text 了
+        "<字符串>" —— 有，而且这里存着原始测量值
+
+    第三种是最有用的：它把【证据】和【文案】分开存。
+      · Phase 3 的确定性校验器需要一份「合法数字白名单」来判断改写有没有编造
+        新数字——这些字符串就是那份白名单的来源
+      · Phase 6 面试模拟追问「这个数据怎么来的」时，原始值在这里
+      · 半年后你自己也还记得 0.936 是 Pearson r 不是准确率
+    """
+    value = bullet.get("metrics")
+    if value is True:
+        return True
+    return isinstance(value, str) and bool(value.strip())
+
+
+def metric_evidence(bullet: dict[str, Any]) -> str | None:
+    """取出 bullet 的原始测量值（如果以字符串形式记了的话）。"""
+    value = bullet.get("metrics")
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
 def _iter_bullets(entries: list[dict[str, Any]], kind: str):
     """遍历 experiences / projects 下的所有 bullet，带上归属信息。"""
     for entry in entries or []:
@@ -125,7 +151,7 @@ def validate_master_profile(data: dict[str, Any]) -> ValidationReport:
 
         if not (bullet.get("text") or "").strip():
             rep.errors.append(f"bullet {bid} 的 text 为空")
-        if bullet.get("metrics") is not True:
+        if not _has_metrics(bullet):
             no_metrics.append(bid)
         for tag_ref in bullet.get("skills") or []:
             if tag_ref not in skill_ids:
