@@ -1,0 +1,29 @@
+# 密钥：绝不进 git
+.env
+
+# 个人内容不进 git：母简历里有真实姓名、电话、住址和完整履历。
+# 只提交 *.example.yaml 模板，真实文件留在本机。
+config/*.yaml
+!config/*.example.yaml
+
+# 数据库与生成产物（每日备份见 Phase 7，不靠 git 保存）
+data/
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
+build/
+dist/
+
+# 编辑器 / 备份
+*.bak
+.vscode/
+.idea/

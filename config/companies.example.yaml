@@ -1,0 +1,53 @@
+# 目标公司清单 —— Phase 1 抓取和 Phase 5 邮件匹配都靠它
+#
+# 同步进数据库：  agent companies sync
+#
+# 怎么填 ats_type 和 board_token：
+#   别手工猜。跑  agent resolve-ats <careers 页 URL> --name <公司名>
+#   它会抓页面、正则捞候选 token、再打真实 API 验证，最后直接输出可粘贴的片段。
+#   board_token 经常不等于公司名，而且很多公司把 job board 用 iframe 嵌在自己
+#   域名下，地址栏上什么都看不出来 —— 这就是那个工具存在的理由。
+#
+# email_domains 一定要填。Phase 5 把邮件匹配回投递记录的第一步就是查发件域名，
+# 空着的话这家公司的所有邮件都会落到人工队列里。
+#   一般要填两类：公司自己的域名（acme.com），以及它的 ATS 发信域名：
+#     Greenhouse -> greenhouse-mail.io    Lever -> hire.lever.co
+#     Ashby      -> ashbyhq.com           Workday -> myworkday.com
+#
+# priority: 1 最高。抓取频率和推送优先级都会参考它。
+
+companies:
+  # ---- 示例：Greenhouse ----
+  - name: Databricks
+    ats_type: greenhouse
+    board_token: databricks
+    careers_url: https://www.databricks.com/company/careers/open-positions
+    email_domains: [databricks.com, greenhouse-mail.io]
+    priority: 2
+    notes: "板子很大（实测 870 个岗位、178 个地点），务必先过地点过滤"
+
+  # ---- 示例：Ashby ----
+  - name: Ramp
+    ats_type: ashby
+    board_token: ramp
+    careers_url: https://ashbyhq.com/ramp
+    email_domains: [ramp.com, ashbyhq.com]
+    priority: 2
+    notes: "Ashby 加 includeCompensation=true 能直接拿到结构化薪资，不必过 LLM"
+
+  # ---- 示例：Lever ----
+  # - name: Example Co
+  #   ats_type: lever
+  #   board_token: exampleco
+  #   careers_url: https://jobs.lever.co/exampleco
+  #   email_domains: [exampleco.com, hire.lever.co]
+  #   priority: 3
+
+  # ---- 示例：Workday（没有稳定公开接口，Phase 1 第二轮再用 Playwright 处理）----
+  # - name: Big Enterprise
+  #   ats_type: workday
+  #   board_token: bigenterprise
+  #   careers_url: https://bigenterprise.wd1.myworkdayjobs.com/careers
+  #   email_domains: [bigenterprise.com, myworkday.com]
+  #   priority: 4
+  #   is_active: false

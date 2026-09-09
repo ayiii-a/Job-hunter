@@ -1,0 +1,83 @@
+# 目标画像 —— 规则初筛的依据
+#
+# 这份文件决定 Phase 1 的规则初筛怎么过滤。它比你想的更重要：
+# 实测单是 Databricks 一家公司就有 870 个在招岗位、178 个不同地点，
+# 其中只有约三分之一在美国。80 家目标公司很可能意味着 5,000–15,000 个开放岗位。
+# 没有这道过滤，Phase 2 第一天就会被成本和噪音双杀。
+#
+# 【排除项比包含项更省时间】。过滤掉不合适的岗位，比找到合适的岗位价值更高。
+# 改完跑一次：  agent profile check
+
+# --- 正向关键词：岗位标题命中任意一条才进入下一步 ---
+titles_include:
+  - Software Engineer
+  - Backend Engineer
+  - Platform Engineer
+  - Infrastructure Engineer
+  - Full Stack Engineer
+
+# --- 排除关键词：命中任意一条直接丢弃（优先于 include）---
+titles_exclude:
+  - Intern
+  - Internship
+  - New Grad
+  - Manager
+  - Director
+  - Sales
+  - Recruiter
+  - Principal          # 如果你还够不到，就排掉，省得每天看一堆投不了的
+  - Staff              # 同上；够得到就删掉这行
+
+# --- 地点：规则初筛的第一道闸 ---
+# 匹配方式是子串包含，所以写 "United States" 能顺带覆盖 "United States - Remote"
+locations:
+  - Seattle
+  - Bellevue
+  - San Francisco
+  - New York
+  - United States
+  - USA
+remote_ok: true
+remote_only: false
+
+# 明确不要的地点。全球板子上大量岗位在这些地方，先砍掉能省很多 LLM 调用
+locations_exclude:
+  - India
+  - Bengaluru
+  - Japan
+  - Tokyo
+  - Singapore
+  - Netherlands
+  - Amsterdam
+  - Poland
+  - Brazil
+
+# --- 职级 ---
+seniority_min: mid          # junior | mid | senior | staff | principal
+seniority_max: senior
+years_experience: 6
+
+# --- 签证 ---
+# 需要 sponsorship 就设 true，会把明确写「no sponsorship」的岗位判为硬性不满足
+needs_sponsorship: false
+
+# --- 薪资底线（USD 年薪 base）。低于这个数的直接降档，不浪费 LLM 调用 ---
+salary_floor: 150000
+
+# --- 加权偏好：影响判定档位，但要和技能匹配分开展示 ---
+preferences:
+  industries_like:
+    - developer tools
+    - infrastructure
+    - data platform
+  industries_avoid:
+    - adtech
+    - gambling
+    - crypto trading
+  company_size: any          # startup | growth | large | any
+
+# --- deal-breakers：命中就是 skip，不管其他条件多好 ---
+deal_breakers:
+  - "on-site 5 days per week"
+  - "unpaid take-home longer than 4 hours"
+  - "requires active security clearance"

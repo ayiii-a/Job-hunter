@@ -1,0 +1,290 @@
+"""命令行入口。
+
+Phase 0 只有骨架相关的命令：建库、校验母简历、同步公司清单、反查 ATS、重算状态。
+抓取 / 分析 / 投递等命令随后面的 Phase 加进来。
+"""
+
+from __future__ import annotations
+
+import argparse
+import sys
+from typing import Any
+
+from . import config, db, profile
+from .tools import resolve_ats
+
+config.force_utf8_stdio()
+
+
+def _ok(msg: str) -> None:
+    print(f"  ✓ {msg}")
+
+
+def _warn(msg: str) -> None:
+    print(f"  ! {msg}")
+
+
+def _err(msg: str) -> None:
+    print(f"  ✗ {msg}")
+
+
+# ---------------------------------------------------------------------------
+# init
+# ---------------------------------------------------------------------------
+
+def cmd_init(args: argparse.Namespace) -> int:
+    path = config.db_path()
+    existed = path.exists()
+    conn = db.connect(path)
+    db.init_db(conn)
+    tables = db.table_names(conn)
+    conn.close()
+
+    print(f"数据库：{path}" + ("（已存在，已应用缺失的表）" if existed else "（新建）"))
+    _ok(f"{len(tables)} 张表：{', '.join(tables)}")
+
+    created = config.bootstrap_configs()
+    if created:
+        _ok(f"从模板生成了配置文件：{', '.join(p.name for p in created)}")
+        _warn("这些文件不进 git（里面会有你的个人信息），内容全部要换成你自己的")
+
+    if not (config.ROOT / ".env").exists():
+        _warn("还没有 .env。复制一份：cp .env.example .env")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# profile check
+# ---------------------------------------------------------------------------
+
+def _print_report(title: str, rep: profile.ValidationReport) -> None:
+    print(f"\n{title}")
+    if rep.stats:
+        print("  " + "  ".join(f"{k}={v}" for k, v in rep.stats.items()))
+    for e in rep.errors:
+        _err(e)
+    for w in rep.warnings:
+        _warn(w)
+    if rep.ok and not rep.warnings:
+        _ok("没有问题")
+    elif rep.ok:
+        _ok(f"没有错误（{len(rep.warnings)} 条提醒）")
+
+
+def cmd_profile_check(args: argparse.Namespace) -> int:
+    failed = False
+
+    if config.MASTER_PROFILE_PATH.exists():
+        rep = profile.validate_master_profile(profile.load_master_profile())
+        _print_report(f"母简历  {config.MASTER_PROFILE_PATH.name}", rep)
+        failed |= not rep.ok
+    else:
+        _err(f"找不到 {config.MASTER_PROFILE_PATH}——跑一次 agent init 从模板生成")
+        failed = True
+
+    if config.TARGET_PROFILE_PATH.exists():
+        rep = profile.validate_target_profile(profile.load_target_profile())
+        _print_report(f"目标画像  {config.TARGET_PROFILE_PATH.name}", rep)
+        failed |= not rep.ok
+    else:
+        _err(f"找不到 {config.TARGET_PROFILE_PATH}——跑一次 agent init 从模板生成")
+        failed = True
+
+    return 1 if failed else 0
+
+
+# ---------------------------------------------------------------------------
+# companies sync
+# ---------------------------------------------------------------------------
+
+def cmd_companies_sync(args: argparse.Namespace) -> int:
+    if not config.COMPANIES_PATH.exists():
+        _err(f"找不到 {config.COMPANIES_PATH}——跑一次 agent init 从模板生成")
+        return 1
+
+    data = profile.load_yaml(config.COMPANIES_PATH)
+    entries: list[dict[str, Any]] = data.get("companies") or []
+    if not entries:
+        _warn("companies.yaml 里一家公司都没有")
+        return 0
+
+    conn = db.connect()
+    db.init_db(conn)
+    inserted = updated = 0
+    missing_domains: list[str] = []
+
+    for e in entries:
+        name = (e.get("name") or "").strip()
+        if not name:
+            _err(f"有一条记录没有 name，跳过：{e}")
+            continue
+        domains = e.get("email_domains") or []
+        if not domains:
+            missing_domains.append(name)
+
+        row = conn.execute("SELECT id FROM companies WHERE name = ?", (name,)).fetchone()
+        fields = (
+            e.get("ats_type"),
+            e.get("board_token"),
+            e.get("careers_url"),
+            db.dump_json(domains),
+            int(e.get("priority") or 3),
+            e.get("notes"),
+            1 if e.get("is_active", True) else 0,
+        )
+        if row:
+            conn.execute(
+                "UPDATE companies SET ats_type=?, board_token=?, careers_url=?, "
+                "email_domains_json=?, priority=?, notes=?, is_active=? WHERE id=?",
+                (*fields, row["id"]),
+            )
+            updated += 1
+        else:
+            conn.execute(
+                "INSERT INTO companies (ats_type, board_token, careers_url, "
+                "email_domains_json, priority, notes, is_active, name) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (*fields, name),
+            )
+            inserted += 1
+
+    conn.commit()
+    total = conn.execute("SELECT COUNT(*) c FROM companies").fetchone()["c"]
+    conn.close()
+
+    _ok(f"新增 {inserted}，更新 {updated}，库里共 {total} 家")
+    if missing_domains:
+        _warn(
+            f"{len(missing_domains)} 家没填 email_domains："
+            f"{', '.join(missing_domains[:8])}{' ...' if len(missing_domains) > 8 else ''}"
+        )
+        _warn("Phase 5 靠这个字段把邮件匹配回投递记录，空着的话那家公司的邮件会全部落到人工队列")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# resolve-ats
+# ---------------------------------------------------------------------------
+
+def cmd_resolve_ats(args: argparse.Namespace) -> int:
+    print(f"排查：{args.target}")
+    candidates = resolve_ats.resolve(
+        args.target, name=args.name, verify=not args.no_verify
+    )
+    if not candidates:
+        _err("没有找到任何候选。可能是 job board 由 JS 动态加载——"
+             "手动打开 careers 页点进一个岗位，看那个岗位详情页的地址")
+        return 1
+
+    verified = [c for c in candidates if c.verified]
+    print()
+    for c in candidates[:12]:
+        mark = "✓" if c.verified else " "
+        count = f"{c.job_count} 个岗位" if c.job_count is not None else ""
+        print(f"  {mark} {c.ats_type:<11} {c.token:<28} [{c.origin}] {count} {c.detail}")
+
+    if verified:
+        best = verified[0]
+        name = args.name or (best.token if not args.target.startswith("http") else args.target)
+        careers = args.target if args.target.startswith("http") else ""
+        print("\n粘进 config/companies.yaml：\n")
+        print(resolve_ats.format_yaml_entry(name, best, careers))
+        return 0
+
+    _warn("有候选但没有一个验证通过。上面的 detail 列说明了原因")
+    return 1
+
+
+# ---------------------------------------------------------------------------
+# status rebuild
+# ---------------------------------------------------------------------------
+
+def cmd_status_rebuild(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    db.init_db(conn)
+    result = db.rebuild_all_statuses(conn)
+    conn.close()
+
+    print(f"重算了 {result['total']} 条 application")
+    for app_id, before, after in result["changed"]:
+        print(f"  #{app_id}: {before} -> {after}")
+    if not result["changed"]:
+        _ok("没有变化")
+    if result["orphans"]:
+        _err(f"这些 application 一条事件都没有（数据错误）：{result['orphans']}")
+    if result["unknown_event_types"]:
+        _err(
+            "遇到未登记的事件类型，它们被静默忽略了，请到 status.py 里登记："
+            f"{result['unknown_event_types']}"
+        )
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# stats
+# ---------------------------------------------------------------------------
+
+def cmd_stats(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    db.init_db(conn)
+    print(f"数据库：{config.db_path()}\n")
+    for table in db.table_names(conn):
+        if table == "schema_version":
+            continue
+        n = conn.execute(f"SELECT COUNT(*) c FROM {table}").fetchone()["c"]
+        print(f"  {table:<18} {n}")
+
+    rows = conn.execute(
+        "SELECT status, COUNT(*) c FROM applications GROUP BY status ORDER BY c DESC"
+    ).fetchall()
+    if rows:
+        print("\n  投递状态分布")
+        for r in rows:
+            print(f"    {str(r['status']):<16} {r['c']}")
+    conn.close()
+    return 0
+
+
+# ---------------------------------------------------------------------------
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="agent", description="Job Hunting Agent")
+    sub = p.add_subparsers(dest="command", required=True)
+
+    sub.add_parser("init", help="建库/补表").set_defaults(func=cmd_init)
+    sub.add_parser("stats", help="看各表行数和投递状态分布").set_defaults(func=cmd_stats)
+
+    pr = sub.add_parser("profile", help="母简历与目标画像")
+    prsub = pr.add_subparsers(dest="sub", required=True)
+    prsub.add_parser("check", help="校验 ID 唯一性、引用完整性").set_defaults(
+        func=cmd_profile_check
+    )
+
+    co = sub.add_parser("companies", help="目标公司清单")
+    cosub = co.add_subparsers(dest="sub", required=True)
+    cosub.add_parser("sync", help="companies.yaml -> 数据库").set_defaults(
+        func=cmd_companies_sync
+    )
+
+    st = sub.add_parser("status", help="投递状态")
+    stsub = st.add_subparsers(dest="sub", required=True)
+    stsub.add_parser("rebuild", help="按 events 全量重算 status 缓存").set_defaults(
+        func=cmd_status_rebuild
+    )
+
+    ra = sub.add_parser("resolve-ats", help="从 careers 页反查 ATS 类型和 board_token")
+    ra.add_argument("target", help="careers 页 URL，或直接给公司名")
+    ra.add_argument("--name", help="公司名（target 是 URL 时用来猜 token）")
+    ra.add_argument("--no-verify", action="store_true", help="只提取候选，不打接口验证")
+    ra.set_defaults(func=cmd_resolve_ats)
+
+    return p
+
+
+def main(argv: list[str] | None = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

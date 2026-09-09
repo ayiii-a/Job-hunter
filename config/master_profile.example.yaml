@@ -1,0 +1,157 @@
+# 母简历 —— 整个项目的地基
+#
+# 这份文件比任何一份实际投出去的简历都长得多。把所有能写的都写进来，
+# 定制简历时由 LLM 从这里【按 ID 选材】，它只输出 ID、不输出文本——
+# 这是防幻觉的核心机制，所以 ID 的唯一性和引用的完整性必须成立。
+# 改完跑一次：  agent profile check
+#
+# 两条规矩：
+#   1. 不要写你不能在面试里展开讲的东西。agent 只会放大你给它的内容。
+#   2. bullet 尽量带量化结果。没有数据的标 metrics: false，定制时会优先选有数据的。
+#
+# 目标市场是北美 / 英文，所以正文一律英文；注释是给你自己看的，用中文。
+# 下面是【示例内容】，结构可以照抄，文字全部替换成你自己的。
+
+basics:
+  name: Your Name
+  email: you@example.com
+  phone: "+1-555-000-0000"
+  location: "Seattle, WA, USA"
+  links:
+    github: https://github.com/yourname
+    linkedin: https://linkedin.com/in/yourname
+    website: ""
+  # 这条会被投递表单反复问到，写成可以直接粘贴的一句话
+  work_authorization: "Authorized to work in the US; no sponsorship required."
+
+
+# ---------------------------------------------------------------------------
+# skills —— 每个技能一个 id。experiences.tech 和 bullets.skills 都引用这些 id。
+#           level: beginner | intermediate | advanced | expert
+# ---------------------------------------------------------------------------
+skills:
+  - {id: sk_python,    name: Python,     level: expert,       years: 6}
+  - {id: sk_typescript, name: TypeScript, level: advanced,     years: 4}
+  - {id: sk_postgres,  name: PostgreSQL, level: advanced,     years: 5}
+  - {id: sk_k8s,       name: Kubernetes, level: intermediate, years: 3}
+  - {id: sk_aws,       name: AWS,        level: advanced,     years: 4}
+  - {id: sk_react,     name: React,      level: intermediate, years: 3}
+
+
+# ---------------------------------------------------------------------------
+# experiences —— 工作经历
+#   id      : 唯一，建议 exp_<公司>
+#   tech    : 引用 skills 里的 id
+#   bullets : 每条一个全局唯一 id（建议 b_<公司>_<序号>）
+#     text    : 正文，英文，用动词开头
+#     tags    : 自由主题标签，给你自己分类用，不校验
+#     skills  : 引用 skills 里的 id，选材时按这个匹配 JD 的技能要求
+#     metrics : 有没有量化结果。没有就写 false，别硬编数字
+# ---------------------------------------------------------------------------
+experiences:
+  - id: exp_acme
+    company: Acme Corp
+    title: Senior Software Engineer
+    location: "Seattle, WA"
+    period: "2022-03 ~ 2024-08"
+    tech: [sk_python, sk_k8s, sk_postgres, sk_aws]
+    bullets:
+      - id: b_acme_01
+        text: "Cut p95 latency of the order service from 800ms to 120ms by replacing N+1 queries with a batched loader and adding a read-through cache."
+        tags: [performance, backend]
+        skills: [sk_python, sk_postgres]
+        metrics: true
+      - id: b_acme_02
+        text: "Led migration of 40+ services from EC2 to Kubernetes, cutting deploy time from 25 minutes to under 4 and reducing monthly infra spend by 18%."
+        tags: [infrastructure, migration, leadership]
+        skills: [sk_k8s, sk_aws]
+        metrics: true
+      - id: b_acme_03
+        text: "Mentored three junior engineers through their first on-call rotations and wrote the team's incident runbook."
+        tags: [leadership, mentoring]
+        skills: []
+        metrics: false
+
+  - id: exp_globex
+    company: Globex
+    title: Software Engineer
+    location: "Remote"
+    period: "2019-07 ~ 2022-02"
+    tech: [sk_python, sk_typescript, sk_react]
+    bullets:
+      - id: b_globex_01
+        text: "Built the customer-facing analytics dashboard used by 2,000+ accounts, owning it end to end from API design through React frontend."
+        tags: [fullstack, product]
+        skills: [sk_typescript, sk_react, sk_python]
+        metrics: true
+      - id: b_globex_02
+        text: "Introduced contract tests between the billing and provisioning services, eliminating a recurring class of release-day outages."
+        tags: [testing, reliability]
+        skills: [sk_python]
+        metrics: false
+
+
+# ---------------------------------------------------------------------------
+# projects —— 结构与 experiences 相同。开源项目、个人项目、学校项目都可以放
+# ---------------------------------------------------------------------------
+projects:
+  - id: proj_jha
+    name: Job Hunting Agent
+    period: "2026-09 ~ present"
+    url: ""
+    tech: [sk_python]
+    bullets:
+      - id: b_jha_01
+        text: "Built a local-first job search pipeline: ATS ingestion, LLM job-description analysis, and ID-based resume tailoring with a deterministic hallucination checker."
+        tags: [side-project, llm]
+        skills: [sk_python]
+        metrics: false
+
+
+education:
+  - id: edu_01
+    school: State University
+    degree: "B.S. in Computer Science"
+    period: "2015-09 ~ 2019-06"
+    notes: ""
+
+
+# ---------------------------------------------------------------------------
+# qa_bank —— 投递表单反复问的那些题的标准答案
+#
+# 预填只会填这里【你亲自写好】的内容。没覆盖到的问题一律留空标红由你填，
+# 尤其是工作授权、签证、犯罪记录、EEO 这类法律相关的，agent 绝不自动作答。
+# ---------------------------------------------------------------------------
+qa_bank:
+  work_authorization: "I am authorized to work in the United States and do not require visa sponsorship now or in the future."
+  sponsorship_required: "No."
+  salary_expectation: "I'm targeting $X–$Y base depending on scope and total compensation, and I'm happy to discuss the range for this specific role."
+  notice_period: "Two weeks."
+  relocation: "Open to relocation for the right role; currently based in Seattle."
+  # 这条值得单独花力气打磨：它出现在很大一部分 Greenhouse / Lever 表单上，
+  # 是真正的每份申请时间成本所在。留 {company} / {role} 作占位。
+  why_company_template: "I'm drawn to {company} because ... . The {role} role lines up with my work on ... ."
+
+
+# ---------------------------------------------------------------------------
+# story_bank —— 面试用的 STAR 故事，关联回具体 bullet
+#
+# 这是全项目的闭环所在：模拟面试暴露出某个 bullet 讲不清楚
+# -> 回来补 story 或改母简历。linked_bullets 里的 id 必须真实存在。
+# ---------------------------------------------------------------------------
+story_bank:
+  - id: st_latency
+    title: "Driving a cross-team latency fix"
+    linked_bullets: [b_acme_01]
+    situation: "The order service was timing out during peak hours and two teams disagreed on the cause."
+    task: "I owned finding the actual bottleneck and getting a fix shipped without a rewrite."
+    action: "Profiled the request path, found an N+1 query pattern, batched the loader, and added a read-through cache behind a feature flag."
+    result: "p95 dropped from 800ms to 120ms; the flag let us roll out to 5% first and catch a cache invalidation bug before full release."
+
+  - id: st_migration
+    title: "Kubernetes migration across 40 services"
+    linked_bullets: [b_acme_02]
+    situation: "Deploys took 25 minutes and infra costs were growing faster than traffic."
+    task: "Lead the migration without a feature freeze."
+    action: "Sequenced services by blast radius, wrote a shared Helm chart, and ran both stacks in parallel for four weeks."
+    result: "Deploy time under 4 minutes, infra spend down 18%, zero customer-visible incidents during the migration."
