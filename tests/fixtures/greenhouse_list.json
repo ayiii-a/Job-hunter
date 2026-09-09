@@ -1,0 +1,171 @@
+{
+ "jobs": [
+  {
+   "absolute_url": "https://databricks.com/company/careers/open-positions/job?gh_jid=8559344002",
+   "data_compliance": [
+    {
+     "type": "gdpr",
+     "requires_consent": false,
+     "requires_processing_consent": false,
+     "requires_retention_consent": false,
+     "retention_period": null,
+     "demographic_data_consent_applies": false
+    }
+   ],
+   "internal_job_id": 6418982002,
+   "location": {
+    "name": "Tokyo, Japan"
+   },
+   "metadata": [
+    {
+     "id": 9740521002,
+     "name": "Company Assignment",
+     "value": "Databricks Japan K.K.",
+     "value_type": "single_select"
+    },
+    {
+     "id": 24059030002,
+     "name": "Career Page Posting Category",
+     "value": [
+      "Field Engineering"
+     ],
+     "value_type": "multi_select"
+    }
+   ],
+   "id": 8559344002,
+   "updated_at": "2026-09-02T00:28:11-04:00",
+   "requisition_id": "FEQ327R203",
+   "title": "ソリューションアーキテクト (プリセールス)",
+   "company_name": "Databricks",
+   "first_published": "2026-06-29T02:02:50-04:00",
+   "language": "en",
+   "application_deadline": null
+  },
+  {
+   "absolute_url": "https://databricks.com/company/careers/open-positions/job?gh_jid=8428882002",
+   "data_compliance": [
+    {
+     "type": "gdpr",
+     "requires_consent": false,
+     "requires_processing_consent": false,
+     "requires_retention_consent": false,
+     "retention_period": null,
+     "demographic_data_consent_applies": false
+    }
+   ],
+   "internal_job_id": 6366831002,
+   "location": {
+    "name": "Tokyo, Japan"
+   },
+   "metadata": [
+    {
+     "id": 9740521002,
+     "name": "Company Assignment",
+     "value": "Databricks Japan K.K.",
+     "value_type": "single_select"
+    },
+    {
+     "id": 24059030002,
+     "name": "Career Page Posting Category",
+     "value": [
+      "Field Engineering"
+     ],
+     "value_type": "multi_select"
+    }
+   ],
+   "id": 8428882002,
+   "updated_at": "2026-09-02T00:18:07-04:00",
+   "requisition_id": "CSQ327R31",
+   "title": "デリバリーソリューションアーキテクト",
+   "company_name": "Databricks",
+   "first_published": "2026-03-05T06:43:29-05:00",
+   "language": "ja",
+   "application_deadline": null
+  },
+  {
+   "absolute_url": "https://databricks.com/company/careers/open-positions/job?gh_jid=6918763002",
+   "data_compliance": [
+    {
+     "type": "gdpr",
+     "requires_consent": false,
+     "requires_processing_consent": false,
+     "requires_retention_consent": false,
+     "retention_period": null,
+     "demographic_data_consent_applies": false
+    }
+   ],
+   "internal_job_id": 5632983002,
+   "location": {
+    "name": "Bengaluru, India; Mumbai, India"
+   },
+   "metadata": [
+    {
+     "id": 9740521002,
+     "name": "Company Assignment",
+     "value": "Databricks India Private Limited",
+     "value_type": "single_select"
+    },
+    {
+     "id": 24059030002,
+     "name": "Career Page Posting Category",
+     "value": [
+      "Sales"
+     ],
+     "value_type": "multi_select"
+    }
+   ],
+   "id": 6918763002,
+   "updated_at": "2026-08-18T13:17:06-04:00",
+   "requisition_id": "P-985",
+   "title": "Account Executive ",
+   "company_name": "Databricks",
+   "first_published": "2023-12-12T05:19:55-05:00",
+   "language": "en",
+   "application_deadline": null
+  },
+  {
+   "absolute_url": "https://databricks.com/company/careers/open-positions/job?gh_jid=8758263002",
+   "data_compliance": [
+    {
+     "type": "gdpr",
+     "requires_consent": false,
+     "requires_processing_consent": false,
+     "requires_retention_consent": false,
+     "retention_period": null,
+     "demographic_data_consent_applies": false
+    }
+   ],
+   "internal_job_id": 6247958002,
+   "location": {
+    "name": "Tokyo, Japan"
+   },
+   "metadata": [
+    {
+     "id": 9740521002,
+     "name": "Company Assignment",
+     "value": "Databricks Japan K.K.",
+     "value_type": "single_select"
+    },
+    {
+     "id": 24059030002,
+     "name": "Career Page Posting Category",
+     "value": [
+      "Sales"
+     ],
+     "value_type": "multi_select"
+    }
+   ],
+   "id": 8758263002,
+   "updated_at": "2026-09-02T00:11:22-04:00",
+   "requisition_id": "SLSQ127R32",
+   "title": "Account Executive, Commercial - Hunter",
+   "company_name": "Databricks",
+   "first_published": "2026-08-27T19:45:30-04:00",
+   "language": "en",
+   "application_deadline": null
+  }
+ ],
+ "meta": {
+  "total": 869
+ }
+}

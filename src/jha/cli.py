@@ -10,7 +10,7 @@ import argparse
 import sys
 from typing import Any
 
-from . import config, db, profile
+from . import config, db, ingest, notify, profile
 from .tools import resolve_ats
 
 config.force_utf8_stdio()
@@ -204,6 +204,169 @@ def cmd_resolve_ats(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# fetch
+# ---------------------------------------------------------------------------
+
+def cmd_fetch(args: argparse.Namespace) -> int:
+    if not config.TARGET_PROFILE_PATH.exists():
+        _err("找不到 target_profile.yaml——规则初筛没有它就等于不过滤")
+        return 1
+    target = profile.load_target_profile()
+
+    conn = db.connect()
+    db.init_db(conn)
+    reports = ingest.fetch_all(
+        conn, target,
+        only=args.company,
+        dry_run=args.dry_run,
+        fetch_details=not args.no_detail,
+        delay=0.0 if args.fast else ingest.DETAIL_DELAY_SECONDS,
+    )
+    if not reports:
+        _warn("没有可抓的公司。先 agent companies sync")
+        conn.close()
+        return 1
+
+    print()
+    for r in reports:
+        (_ok if r.ok else _err)(r.headline)
+        if args.explain and r.screen_reasons:
+            for reason, n in list(r.screen_reasons.items())[:6]:
+                print(f"      初筛丢弃 · {reason}: {n}")
+
+    if args.explain:
+        _print_dropped_samples(reports)
+
+    new_jobs = [j for r in reports for j in r.new_jobs]
+    failures = ingest.failing_sources(conn)
+    conn.close()
+
+    if failures:
+        print()
+        _err(f"{len(failures)} 家最近一次抓取是失败的：")
+        for f in failures:
+            print(f"      {f['name']}（{f['source']}）：{(f['error'] or '')[:100]}")
+
+    print()
+    digest = notify.format_digest(new_jobs, failures)
+    if args.notify:
+        res = notify.send(digest)
+        (_ok if res.sent else _warn)(
+            f"推送到 {res.channel}" if res.sent else f"推送未发出：{res.detail}"
+        )
+        if not res.sent:
+            print("\n" + digest)
+    else:
+        print(digest)
+        if not args.dry_run and notify.configured():
+            print("\n（加 --notify 可以推到 Telegram）")
+    return 0
+
+
+def _print_dropped_samples(reports: list[ingest.FetchReport]) -> None:
+    """抽样展示被初筛丢掉的岗位。
+
+    路线图要求前两周每天看漏报和误报来调过滤条件。被丢弃的岗位不入库
+    （不然 5,000+ 条噪音会淹掉数据库），所以要在这里当场看。
+    """
+    for r in reports:
+        if not r.dropped:
+            continue
+        print(f"\n  {r.company} 丢弃样本：")
+        for job, res in r.dropped[:8]:
+            print(f"      {job.title[:52]:<52} | {job.location[:22]:<22} | {res.reason}")
+
+
+# ---------------------------------------------------------------------------
+# jobs
+# ---------------------------------------------------------------------------
+
+def cmd_jobs_list(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    db.init_db(conn)
+    sql = (
+        "SELECT j.id, c.name company, j.title, j.location, j.salary_raw, "
+        "j.screen_tier, j.is_active, j.first_seen_at "
+        "FROM jobs j LEFT JOIN companies c ON c.id = j.company_id "
+    )
+    sql += "WHERE 1=1 " if args.all else "WHERE j.is_active = 1 "
+    params: list[Any] = []
+    if args.company:
+        sql += "AND lower(c.name) = lower(?) "
+        params.append(args.company)
+    if args.tier:
+        sql += "AND j.screen_tier = ? "
+        params.append(args.tier)
+    sql += "ORDER BY j.screen_tier, j.first_seen_at DESC LIMIT ?"
+    params.append(args.limit)
+
+    rows = conn.execute(sql, params).fetchall()
+    conn.close()
+    if not rows:
+        _warn("库里没有匹配的岗位。先跑 agent fetch")
+        return 0
+
+    for r in rows:
+        flag = "" if r["is_active"] else " (已下架)"
+        tier = f"[{r['screen_tier']}] " if r["screen_tier"] else ""
+        print(f"#{r['id']:<5} {tier}{r['company']} — {r['title']}{flag}")
+        extra = " · ".join(x for x in (r["location"], r["salary_raw"]) if x)
+        if extra:
+            print(f"       {extra}")
+    print(f"\n共 {len(rows)} 条")
+    return 0
+
+
+def cmd_jobs_show(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    db.init_db(conn)
+    row = conn.execute(
+        "SELECT j.*, c.name company FROM jobs j "
+        "LEFT JOIN companies c ON c.id = j.company_id WHERE j.id = ?",
+        (args.job_id,),
+    ).fetchone()
+    if row is None:
+        conn.close()
+        _err(f"没有 id 为 {args.job_id} 的岗位")
+        return 1
+
+    contacts = conn.execute(
+        "SELECT name, relationship, strength FROM contacts WHERE company_id = ? "
+        "ORDER BY strength DESC",
+        (row["company_id"],),
+    ).fetchall()
+    conn.close()
+
+    print(f"#{row['id']}  {row['company']} — {row['title']}")
+    for label, value in (
+        ("地点", row["location"]), ("远程", row["remote_type"]),
+        ("薪资", row["salary_raw"]), ("档位", row["screen_tier"]),
+        ("发布", row["posted_at"]), ("首见", row["first_seen_at"]),
+        ("最近可见", row["last_seen_at"]), ("链接", row["url"]),
+    ):
+        if value:
+            print(f"  {label}：{value}")
+    if not row["is_active"]:
+        _warn("这个岗位已经下架了（JD 全文仍然留着，面试时还用得上）")
+
+    if contacts:
+        print(f"\n  ★ 这家你认识人 —— 先要内推，别直接投：")
+        for c in contacts:
+            rel = f"（{c['relationship']}）" if c["relationship"] else ""
+            print(f"      {c['name']}{rel}  关系强度 {c['strength']}")
+
+    jd = row["jd_text"] or ""
+    print(f"\n  JD（{len(jd)} 字）")
+    print("  " + "-" * 60)
+    body = jd if args.full else jd[:1500]
+    for line in body.splitlines():
+        print("  " + line)
+    if not args.full and len(jd) > 1500:
+        print(f"\n  …… 还有 {len(jd) - 1500} 字，加 --full 看全文")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # status rebuild
 # ---------------------------------------------------------------------------
 
@@ -279,6 +442,28 @@ def build_parser() -> argparse.ArgumentParser:
     stsub.add_parser("rebuild", help="按 events 全量重算 status 缓存").set_defaults(
         func=cmd_status_rebuild
     )
+
+    fe = sub.add_parser("fetch", help="抓取目标公司的新岗位")
+    fe.add_argument("--company", help="只抓这一家")
+    fe.add_argument("--dry-run", action="store_true", help="只跑不写库")
+    fe.add_argument("--no-detail", action="store_true", help="跳过 JD 全文抓取（只看有哪些岗位）")
+    fe.add_argument("--explain", action="store_true", help="显示初筛丢弃原因和样本，用来调过滤条件")
+    fe.add_argument("--notify", action="store_true", help="把摘要推到 Telegram")
+    fe.add_argument("--fast", action="store_true", help="取消请求间隔（只在自己调试时用）")
+    fe.set_defaults(func=cmd_fetch)
+
+    jo = sub.add_parser("jobs", help="看抓到的岗位")
+    josub = jo.add_subparsers(dest="sub", required=True)
+    jl = josub.add_parser("list", help="列出岗位")
+    jl.add_argument("--company")
+    jl.add_argument("--tier", help="只看某一档，如 tier1_ai_engineer")
+    jl.add_argument("--limit", type=int, default=40)
+    jl.add_argument("--all", action="store_true", help="包括已下架的")
+    jl.set_defaults(func=cmd_jobs_list)
+    js = josub.add_parser("show", help="看单个岗位和 JD 全文")
+    js.add_argument("job_id", type=int)
+    js.add_argument("--full", action="store_true", help="打印完整 JD")
+    js.set_defaults(func=cmd_jobs_show)
 
     ra = sub.add_parser("resolve-ats", help="从 careers 页反查 ATS 类型和 board_token")
     ra.add_argument("target", help="careers 页 URL，或直接给公司名")

@@ -26,10 +26,40 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
-def init_db(conn: sqlite3.Connection) -> None:
-    """建表。schema.sql 全程 IF NOT EXISTS，重复跑是安全的。"""
+SCHEMA_VERSION = 2
+
+#: 后加的列。schema.sql 里已经有它们（新库直接建好），这份清单是给**已存在的库**
+#: 升级用的——`CREATE TABLE IF NOT EXISTS` 不会给旧表补列，跑起来只会在
+#: 第一次 INSERT 时炸 "no such column"。按列是否存在来决定加不加，天然幂等。
+_ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("jobs", "miss_count", "INTEGER NOT NULL DEFAULT 0"),
+    ("jobs", "screen_tier", "TEXT"),
+)
+
+
+def _columns(conn: sqlite3.Connection, table: str) -> set[str]:
+    return {r["name"] for r in conn.execute(f"PRAGMA table_info({table})")}
+
+
+def init_db(conn: sqlite3.Connection) -> list[str]:
+    """建表并补列。schema.sql 全程 IF NOT EXISTS，重复跑是安全的。
+
+    返回这次实际补上的列，方便 CLI 告诉你库被升级了。
+    """
     conn.executescript(config.read_text(SCHEMA_PATH))
+
+    added: list[str] = []
+    existing_tables = set(table_names(conn))
+    for table, column, ddl in _ADDED_COLUMNS:
+        if table not in existing_tables:
+            continue
+        if column not in _columns(conn, table):
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            added.append(f"{table}.{column}")
+
+    conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
     conn.commit()
+    return added
 
 
 def table_names(conn: sqlite3.Connection) -> list[str]:

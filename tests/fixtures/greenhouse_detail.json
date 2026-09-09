@@ -1,0 +1,62 @@
+{
+ "absolute_url": "https://databricks.com/company/careers/open-positions/job?gh_jid=8559344002",
+ "data_compliance": [
+  {
+   "type": "gdpr",
+   "requires_consent": false,
+   "requires_processing_consent": false,
+   "requires_retention_consent": false,
+   "retention_period": null,
+   "demographic_data_consent_applies": false
+  }
+ ],
+ "internal_job_id": 6418982002,
+ "location": {
+  "name": "Tokyo, Japan"
+ },
+ "metadata": [
+  {
+   "id": 9740521002,
+   "name": "Company Assignment",
+   "value": "Databricks Japan K.K.",
+   "value_type": "single_select"
+  },
+  {
+   "id": 24059030002,
+   "name": "Career Page Posting Category",
+   "value": [
+    "Field Engineering"
+   ],
+   "value_type": "multi_select"
+  }
+ ],
+ "id": 8559344002,
+ "updated_at": "2026-09-02T00:28:11-04:00",
+ "requisition_id": "FEQ327R203",
+ "title": "ソリューションアーキテクト (プリセールス)",
+ "company_name": "Databricks",
+ "first_published": "2026-06-29T02:02:50-04:00",
+ "language": "en",
+ "application_deadline": null,
+ "content": "&lt;p data-renderer-start-pos=&quot;1648&quot;&gt;FEQ327R203&lt;/p&gt;\n&lt;p data-renderer-start-pos=&quot;1648&quot;&gt;DatabricksはデータとAIの企業であり、全世界で10,000以上の組織が、Comcast、Condé Nast、Grammarly、Fortune 500の50%以上を含む、Databricks Data Intelligence Platformを利用してデータ、分析、AIを統合し民主化しています。Databricksはサンフランシスコに本社を置き、世界中にオフィスを展開しており、Lakehouse、Apache Spark™、Delta Lake、MLflowのオリジナルクリエイターによって設立されました。詳細については、&lt;a href=&quot;https://x.com/databricks&quot;&gt;X&lt;/a&gt;、&lt;a href=&quot;https://www.linkedin.com/company/databricks&quot;&gt;LinkedIn&lt;/a&gt;、&lt;a href=&quot;https://www.facebook.com/databricksinc&quot;&gt;Facebook&lt;/a&gt;でDatabricksをフォローしてください。&lt;/p&gt;\n&lt;h4&gt;&lt;strong&gt;仕事の内容&lt;/strong&gt;&lt;/h4&gt;\n&lt;h4&gt;プリセールスソリューションアーキテクト（分析、AI、ビッグデータ、パブリッククラウド）として、あなたは営業プロセス全体にわたってハンズオン環境で技術評価フェーズを指導します。あなたは営業チームの技術アドバイザーとなり、現場で顧客要件を実現するために製品チームと連携します。Databricks データインテリジェンスプラットフォームを使用して顧客が具体的なデータ駆動の成果を達成する手助けをし、データチームがプロジェクトを完了し、当社のプラットフォームを企業エコシステムに統合できるよう支援します。ビッグデータ、分析、データエンジニアリング、データサイエンスの問題に対する顧客の最大の課題に対する解決策を見つけながら、あなたは営業チームと一緒にお客様に解決策を提案します。あなたはフィールドエンジニアリングのマネージャーに報告します。&lt;/h4&gt;\n&lt;p&gt;あなたがもたらす影響：&lt;/p&gt;\n&lt;ul&gt;\n&lt;li&gt;あなたはアーキテクチャと設計の側面におけるビッグデータ分析の専門家となります。&lt;/li&gt;\n&lt;li&gt;見込み客をDatabricksの評価と採用へ導きます。&lt;/li&gt;\n&lt;li&gt;リファレンスアーキテクチャ、ハイレベルの導入・移行プラン、およびデモアプリケーションを作成することで顧客を支援します。&lt;/li&gt;\n&lt;li&gt;顧客アーキテクチャをサポートするためにDatabricksとサードパーティアプリケーションを統合します。&lt;/li&gt;\n&lt;li&gt;ワークショップ、セミナー、およびミートアップを主導することで技術コミュニティと関わります。&lt;/li&gt;\n&lt;li&gt;営業と共に、担当するセグメントのクライアントとの成功した関係を築き、技術的およびビジネス価値を提供します。&lt;/li&gt;\n&lt;li&gt;顧客のユースケースのディスカバリー&lt;/li&gt;\n&lt;li&gt;既存顧客のDatabricks環境の最適化&lt;/li&gt;\n&lt;li&gt;Databricks製品改善のための活動&lt;/li&gt;\n&lt;/ul&gt;\n&lt;h4&gt;&lt;strong&gt;必要な条件/経験:&lt;/strong&gt;&lt;/h4&gt;\n&lt;ul&gt;\n&lt;li&gt;様々な業界・産業で外部クライアントと関わるプリセールスまたはポストセールスの経験&lt;/li&gt;\n&lt;li&gt;技術概念を示す経験、プレゼンテーションやホワイトボードを使用した経験&lt;/li&gt;\n&lt;li&gt;パブリッククラウド（AWS、Azure、GCP）内でのアーキテクチャ設計と実装の経験&lt;/li&gt;\n&lt;li&gt;エンタープライズアカウントとの業務経験&lt;/li&gt;\n&lt;li&gt;日本語での流暢なコミュニケーション、および英語でのビジネス上の読み書きができること&lt;/li&gt;\n&lt;li&gt;データ領域、もしくは、機械学習・AI領域の基本的な技術理解。および、SQLのコーディングスキル。&lt;/li&gt;\n&lt;/ul&gt;\n&lt;p&gt;&lt;strong&gt;望ましい経験/スキル:&lt;/strong&gt;&lt;/p&gt;\n&lt;ul&gt;\n&lt;li&gt;データエンジニアリングまたはデータサイエンスのいずれかにおいてコアな強みを持つ顧客向けプリセールスまたはコンサルティングの役割に対する理解があることが望ましい&lt;/li&gt;\n&lt;li&gt;Apache Spark™、AI、データサイエンス、データエンジニアリング、Hadoop、Cassandraなどのビッグデータ技術に関する経験&lt;/li&gt;\n&lt;li&gt;Python, Scala, Java、もしくはRを使用したApache Sparkの流暢なコーディング経験&lt;/li&gt;\n&lt;li&gt;データ領域、もしくは、機械学習・AI領域での開発経験。特に、Python(Pandas, NumPy等)のコーディング経験&amp;nbsp;&lt;/li&gt;\n&lt;/ul&gt;\n&lt;p data-renderer-start-pos=&quot;1648&quot;&gt;&amp;nbsp;&lt;/p&gt;&lt;div class=&quot;content-conclusion&quot;&gt;&lt;p&gt;&lt;strong&gt;About Databricks&lt;/strong&gt;&lt;/p&gt;\n&lt;p&gt;&lt;span style=&quot;font-family: arial, sans-serif;&quot;&gt;Databricks is the Data and AI company. More than 20,000 organizations worldwide — including adidas, AT&amp;amp;T, Bayer, Block, Mastercard, Rivian, Unilever, and 70% of the Fortune 500 — rely on the Databricks Data + AI Platform to build and scale data and AI apps, analytics and agents. Headquartered in San Francisco with 30+ offices around the globe, Databricks offers a unified platform that includes Genie, Lakebase, Agent Bricks, Lakeflow, Lakehouse, and Unity Catalog. To learn more, follow Databricks on &lt;a href=&quot;https://www.linkedin.com/company/databricks&quot;&gt;LinkedIn&lt;/a&gt;, &lt;a href=&quot;https://x.com/databricks&quot;&gt;X&lt;/a&gt;, &lt;a href=&quot;https://www.youtube.com/@Databricks&quot;&gt;YouTube&lt;/a&gt;, and &lt;a href=&quot;https://www.instagram.com/databricksinc/?hl=en&quot;&gt;Instagram&lt;/a&gt;.&lt;br&gt;&lt;br&gt;&lt;strong&gt;Benefits&lt;br&gt;&lt;br&gt;&lt;/strong&gt;&lt;/span&gt;At Databricks, we strive to provide comprehensive benefits and perks that meet the needs of all of our employees. For specific details on the benefits offered in your region click &lt;a href=&quot;https://docs.google.com/document/d/154un3e8Xav4BceOSlcYFZRGEuQI54xMxVydRwQn54eQ/edit?usp=sharing&quot;&gt;here&lt;/a&gt;.&lt;br&gt;&lt;br&gt;&lt;/p&gt;\n&lt;p&gt;&lt;strong&gt;Our Commitment to Diversity and Inclusion&lt;/strong&gt;&lt;/p&gt;\n&lt;p&gt;At Databricks, we are committed to fostering a diverse and inclusive culture where everyone can excel. We take great care to ensure that our hiring practices are inclusive and meet equal employment opportunity standards. Individuals looking for employment at Databricks are considered without regard to age, color, disability, ethnicity, family or marital status, gender identity or expression, language, national origin, physical and mental ability, political affiliation, race, religion, sexual orientation, socio-economic status, veteran status, and other protected characteristics.&lt;/p&gt;\n&lt;p&gt;&lt;strong&gt;Compliance&lt;/strong&gt;&lt;/p&gt;\n&lt;p&gt;&lt;strong&gt;&lt;span style=&quot;font-weight: 400;&quot;&gt;If access to export-controlled technology or source code is required for performance of job duties, it is within Employer&#39;s discretion whether to apply for a U.S. government license for such positions, and Employer may decline to proceed with an applicant on this basis alone.&lt;/span&gt;&lt;/strong&gt;&lt;/p&gt;&lt;/div&gt;",
+ "departments": [
+  {
+   "id": 4105217002,
+   "name": "Field Engineering - Other",
+   "child_ids": [],
+   "parent_id": 4069106002
+  }
+ ],
+ "offices": [
+  {
+   "id": 4029277002,
+   "name": "Tokyo, Japan",
+   "location": "Tokyo, Japan",
+   "child_ids": [],
+   "parent_id": 4033856002
+  }
+ ],
+ "ai_disclaimer": null,
+ "include_ai_disclaimer": null,
+ "ai_opt_out_request_url": null
+}

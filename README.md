@@ -6,7 +6,8 @@
 > 所以 `config/*.yaml`、`.env`、`data/` 全部在 `.gitignore` 里，仓库中只保留 `*.example.yaml`。
 > 代价是简历没有 git 版本历史——要的话自己另外备份（Phase 7 会加每日备份）。
 
-当前进度：**Phase 0（骨架）完成**。抓取、分析、简历定制、邮件、面试模拟尚未实现。
+当前进度：**Phase 0（骨架）+ Phase 1（岗位监控）完成**。
+JD 分析、简历定制、邮件、面试模拟尚未实现。
 
 ---
 
@@ -90,6 +91,64 @@ cp .env.example .env
 | `agent companies sync` | `companies.yaml` → 数据库 |
 | `agent status rebuild` | 按 events 全量重算 status 缓存 |
 | `agent stats` | 各表行数 + 投递状态分布 |
+| `agent fetch` | 抓取目标公司的新岗位（Phase 1） |
+| `agent jobs list` | 列出抓到的岗位，按档位排序 |
+| `agent jobs show <id>` | 看单个岗位和 JD 全文 |
+
+`agent fetch` 的开关：`--explain` 显示初筛丢弃原因和样本（调过滤条件全靠它）、
+`--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Telegram。
+
+**定时抓取**（路线图建议每天 2–4 次，岗位发布 48 小时内投递回复率明显更高）：
+
+```bash
+cd "C:/Projects/Job Hunting Agent" && ./.venv/Scripts/agent.exe fetch --notify
+```
+
+---
+
+## Phase 1：岗位监控
+
+### 三个适配器是不对称的
+
+路线图特别强调不能用一个 `fetch()` 糊过去，实测确认了这一点：
+
+| | JD 全文 | 增量字段 | 时间戳 | 薪资 |
+|---|---|---|---|---|
+| **Greenhouse** | 要第二次调用 | **有 `updated_at`** | ISO8601 | 无 |
+| **Lever** | 列表里就带 | 无 | **epoch 毫秒** | 无 |
+| **Ashby** | 列表里就带 | 无 | ISO8601 | **结构化，不用过 LLM** |
+
+差异写成了 `Adapter` 的两个类属性（`provides_jd_in_list` / `supports_incremental`），
+ingest 据此决定抓取策略，而不是对三家做同样的事。
+
+### 省钱的关键是顺序
+
+**规则初筛跑在详情抓取之前。** 实测 Databricks 板子 869 个岗位，
+过完地点和标题过滤只剩 7 个——详情请求就是 7 次而不是 869 次。
+这比列表本身 745KB→9.5MB 的 12 倍差距更值钱。
+
+Greenhouse 的 `updated_at` 再省一层：第二次抓取时详情请求降到 **0**。
+
+### 调过滤条件
+
+被初筛丢掉的岗位**不入库**（不然 5,000+ 条噪音会淹掉数据库），
+所以要用 `--explain` 当场看：
+
+```bash
+./.venv/Scripts/agent.exe fetch --explain
+```
+
+它会打印丢弃原因的分布和样本。第一次跑就靠它抓到了三个真问题：
+
+- **纽约的岗位被 Canada 排掉了** —— 排除检查跑在所有地点拼成的整串上，
+  而 Ramp 的纽约岗位同时提供 Remote (Canada)。改成逐个地点单独判之后，
+  初筛留下的岗位从 6 个变成 36 个。
+- **`New York, NY (HQ)` 匹配不上 `United States`** —— 大部分美国岗位被静默漏掉。
+  现在用 `preset:us`（州全名 + 逗号锚定的州缩写）。
+- **`Sr Software Engineer`（无点）拦不住** —— 七个高级岗位混进了应届列表。
+
+这三个都是**假阴性**：被误杀的岗位不入库，不看 `--explain` 永远不会发现。
+路线图说的「前两周每天看漏报和误报」就是这个意思。
 
 ---
 
@@ -132,8 +191,11 @@ Windows 上 Python 默认编码是 cp1252，而 JD 文本里满是非 ASCII（�
 ```
 config/     *.example.yaml 进 git；同名的 *.yaml 是你的真实内容，不进 git
 src/jha/    schema.sql, db.py, status.py, profile.py, cli.py
+  sources/  三个 ATS 适配器 + RawJob 归一化
   tools/    resolve_ats.py
-tests/      85 个测试
+            filters.py（规则初筛）, ingest.py（抓取管线）, notify.py
+tests/      166 个离线测试 + 5 个 --live 冒烟测试
+  fixtures/ 从真实接口抓的样本，保证测试离线且确定
 data/       SQLite 库（gitignored；Phase 7 会加每日备份）
 ```
 
@@ -141,6 +203,14 @@ data/       SQLite 库（gitignored；Phase 7 会加每日备份）
 
 ## 下一步
 
-Phase 6（面试模拟）和 Phase 0 是并行的，**不用等流水线建完**——有 JD 和你的经历就能开始练。路线图把它排在最前面是有理由的：模拟面试会暴露「哪条 bullet 你讲不清楚」，而那正是写母简历时最需要的反馈。
+按路线图的顺序，接下来是 **Phase 2（JD 分析与匹配）**：给每个岗位出结构化分析 +
+匹配档位（`strong_apply` / `apply` / `stretch` / `skip`）+ gap 列表。
 
-母简历成型之后再进 Phase 1（岗位监控）。
+但在那之前有两件更要紧的事：
+
+1. **扩充 `config/companies.yaml`。** 现在只有 Databricks 和 Ramp 两个示例。
+   路线图建议 30–80 家。用 `agent resolve-ats` 批量查 board_token。
+2. **给母简历的 bullet 补数字。** 12/12 条没有量化结果，这会直接卡住 Phase 3 的选材。
+
+Phase 6（面试模拟）对流水线零依赖，随时可以插进来——而且它能反过来帮你做第 2 件事：
+模拟面试追问「这个数据怎么来的」，正好逼出那些缺失的数字。

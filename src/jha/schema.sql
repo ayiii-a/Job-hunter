@@ -65,6 +65,8 @@ CREATE TABLE IF NOT EXISTS jobs (
     is_shortlisted    INTEGER NOT NULL DEFAULT 0,   -- 取代旧状态机里的 watching
     content_hash      TEXT,
     source_updated_at TEXT,              -- Greenhouse 有 updated_at，可省掉全文抓取
+    miss_count        INTEGER NOT NULL DEFAULT 0,   -- 连续几次抓取没出现；到 2 判下架
+    screen_tier       TEXT,              -- 规则初筛命中的档位（title_tiers）
     UNIQUE (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_company     ON jobs(company_id);
@@ -207,10 +209,36 @@ CREATE INDEX IF NOT EXISTS idx_llm_purpose ON llm_calls(purpose, called_at);
 
 
 -- ---------------------------------------------------------------------------
+-- fetch_runs —— 每次抓取的结果。
+--   抓取器静默失败是最危险的失败模式：你会以为「最近没什么新岗位」，
+--   实际是适配器挂了两周。所以失败告警从 Phase 1 第一天就要有，不能等 Phase 7。
+--   detail_fetches 同时也是成本可见性：它应该远小于 listed_count，
+--   不然说明增量抓取没生效。
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS fetch_runs (
+    id             INTEGER PRIMARY KEY,
+    company_id     INTEGER REFERENCES companies(id) ON DELETE CASCADE,
+    source         TEXT    NOT NULL,
+    started_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    finished_at    TEXT,
+    ok             INTEGER,
+    listed_count   INTEGER NOT NULL DEFAULT 0,   -- 接口返回了多少个岗位
+    kept_count     INTEGER NOT NULL DEFAULT 0,   -- 规则初筛之后剩多少
+    new_count      INTEGER NOT NULL DEFAULT 0,
+    updated_count  INTEGER NOT NULL DEFAULT 0,
+    detail_fetches INTEGER NOT NULL DEFAULT 0,   -- 实际打了多少次详情请求
+    deactivated    INTEGER NOT NULL DEFAULT 0,
+    error          TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runs_company ON fetch_runs(company_id, started_at);
+CREATE INDEX IF NOT EXISTS idx_runs_ok      ON fetch_runs(ok, started_at);
+
+
+-- ---------------------------------------------------------------------------
 -- schema 版本，为后面的迁移留口子
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-INSERT OR IGNORE INTO schema_version (version) VALUES (1);
+INSERT OR IGNORE INTO schema_version (version) VALUES (2);
