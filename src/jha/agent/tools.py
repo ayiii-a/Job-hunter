@@ -571,12 +571,25 @@ def send_notification(conn: sqlite3.Connection, text: str) -> dict:
 
 # ---------------------------------------------------------------------------
 
-def specs(allow: set[Permission] | None = None) -> list[dict[str, Any]]:
-    """给 Messages API 的 tools 参数。allow 可以进一步收窄可用工具。"""
+def specs(
+    allow: set[Permission] | None = None,
+    names: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """给 Messages API 的 tools 参数。
+
+    两种收窄方式：
+        allow  按权限档（粗，省事）——例如只读巡检
+        names  按工具名（细，精确）——定时任务用这个
+
+    收窄不只是省 token（实测每轮千余个）。真正的收益是**爆炸半径**：
+    抓岗位的任务在结构上够不着改投递状态的工具，哪怕它被注入内容说服了。
+    这是「工具即边界」用在任务粒度上。
+    """
     return [
         t.spec()
-        for t in REGISTRY.values()
-        if allow is None or t.permission in allow
+        for name, t in REGISTRY.items()
+        if (allow is None or t.permission in allow)
+        and (names is None or name in names)
     ]
 
 

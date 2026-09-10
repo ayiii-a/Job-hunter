@@ -372,27 +372,54 @@ def cmd_jobs_show(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_run(args: argparse.Namespace) -> int:
+    from . import schedules as sched_mod
     from .agent import AgentClient, Budget, MissingAPIKey, Permission, run as agent_run
+
+    task = args.task
+    tool_names: set[str] | None = None
+    allow: set[Permission] | None = None
+    max_turns, max_calls = args.max_turns, args.max_calls
+    allow_notify, schedule_name = args.allow_notify, None
+
+    if args.schedule:
+        try:
+            s = sched_mod.load(args.schedule)
+        except sched_mod.ScheduleError as exc:
+            _err(str(exc))
+            return 1
+        schedule_name = s.name
+        task = s.task
+        tool_names, allow = s.tools, s.permissions
+        max_turns, max_calls = s.max_turns, s.max_llm_calls
+        # 定义里授权了才放行；命令行的 --allow-notify 仍可单次追加
+        allow_notify = allow_notify or s.allow_notify
+        print(f"定时任务：{s.name}   {s.summary()}\n")
+    elif not task:
+        _err("要么给一句任务，要么用 --schedule <名字>。看有哪些：agent schedules")
+        return 1
 
     conn = db.connect()
     db.init_db(conn)
 
-    allow = {Permission.READ} if args.read_only else None
-    # GATED 工具默认一律拒绝。--allow-notify 是【单次】显式放行，
-    # 不会延续到下一次 run —— 外发动作不该因为你上次同意过就自动发生。
-    approve = (lambda name, a: name == "send_notification") if args.allow_notify else None
+    if args.read_only:
+        allow, tool_names = {Permission.READ}, None
+    # GATED 工具默认一律拒绝。放行是【单次】的，不延续到下一次 run ——
+    # 外发动作不该因为你上次同意过就自动发生。
+    approve = (lambda name, a: name == "send_notification") if allow_notify else None
 
-    print(f"任务：{args.task}\n")
+    print(f"任务：{task}\n")
     try:
         result = agent_run(
-            args.task,
+            task,
             conn,
             client=AgentClient(model=args.model),
-            budget=Budget(max_llm_calls=args.max_calls),
-            max_turns=args.max_turns,
+            budget=Budget(max_llm_calls=max_calls),
+            max_turns=max_turns,
             allow=allow,
+            tool_names=tool_names,
             approve=approve,
-            on_step=lambda s: print(s.render()),
+            schedule_name=schedule_name,
+            on_step=lambda st: print(st.render()),
         )
     except MissingAPIKey as exc:
         _err(str(exc))
@@ -567,6 +594,32 @@ def cmd_analyze(args: argparse.Namespace) -> int:
             extra = f" ✗ {r.error}"
         print(f"  {mark} #{r.job_id:<5} {r.verdict:<13} {(r.rationale or '')[:60]}{extra}")
     print(f"\n  {by_verdict}")
+    return 0
+
+
+def cmd_schedules(args: argparse.Namespace) -> int:
+    from . import schedules as sched_mod
+
+    try:
+        all_ = sched_mod.load_all()
+    except sched_mod.ScheduleError as exc:
+        _err(str(exc))
+        return 1
+    if not all_:
+        _warn(f"还没有定时任务。跑 agent init 从模板生成 {config.SCHEDULES_PATH.name}")
+        return 0
+
+    for s in all_.values():
+        print(f"\n  {s.summary()}")
+        if s.notes:
+            print(f"    {s.notes}")
+        if s.tools:
+            print(f"    工具：{', '.join(sorted(s.tools))}")
+        first = next((l for l in s.task.splitlines() if l.strip()), "")
+        print(f"    任务：{first[:66]}...")
+
+    print(f"\n跑一个：agent run --schedule <名字>")
+    print(f"定义在：{config.SCHEDULES_PATH}")
     return 0
 
 
@@ -746,7 +799,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     ru = sub.add_parser("run", help="跑 agent loop：模型自己决定调哪些工具")
-    ru.add_argument("task", help="要 agent 做的事，用自然语言描述")
+    ru.add_argument("task", nargs="?", help="要 agent 做的事；用 --schedule 时可省略")
+    ru.add_argument("--schedule", help="跑 config/schedules.yaml 里定义的具名任务")
     ru.add_argument("--max-turns", type=int, default=12, help="最多几轮工具往返")
     ru.add_argument("--max-calls", type=int, default=25, help="最多几次 LLM 调用")
     ru.add_argument("--read-only", action="store_true", help="只给只读工具，用于巡检")
@@ -756,6 +810,7 @@ def build_parser() -> argparse.ArgumentParser:
     ru.set_defaults(func=cmd_run)
 
     sub.add_parser("tools", help="列出 agent 能调用的工具和权限档").set_defaults(func=cmd_tools)
+    sub.add_parser("schedules", help="列出定时任务定义").set_defaults(func=cmd_schedules)
 
     sp = sub.add_parser("spend", help="按用途和任务拆 LLM 成本")
     sp.add_argument("--days", type=int, default=30)

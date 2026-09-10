@@ -97,6 +97,7 @@ def run(
     budget: Budget | None = None,
     max_turns: int = 12,
     allow: set[Permission] | None = None,
+    tool_names: set[str] | None = None,
     approve: Callable[[str, dict[str, Any]], bool] | None = None,
     on_step: Callable[[Step], None] | None = None,
     schedule_name: str | None = None,
@@ -105,7 +106,8 @@ def run(
     """跑一次 agent。
 
     approve:       GATED 工具的批准回调。返回 True 才执行。不传 = 一律拒绝。
-    allow:         进一步收窄本次可用的工具集（例如只给 READ 做一次只读巡检）。
+    allow:         按权限档收窄可用工具（例如只给 READ 做一次只读巡检）。
+    tool_names:    按工具名收窄，比 allow 更精确。定时任务用这个。
     schedule_name: 定时任务名，用来按任务拆账。手动跑就留空。
     record:        写 agent_runs / agent_steps。默认开——无人值守跑却不留痕
                    是不能接受的，只有测试才该关掉它。
@@ -113,7 +115,7 @@ def run(
     client = client or AgentClient()
     budget = budget or Budget()
     result = RunResult(task=task)
-    specs = tools_mod.specs(allow)
+    specs = tools_mod.specs(allow, tool_names)
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
 
     recorder = RunRecorder(conn, enabled=record)

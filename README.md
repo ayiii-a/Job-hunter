@@ -101,6 +101,7 @@ cp .env.example .env
 | `agent runs` | 看 agent 干过什么；`--show <id>` 展开完整轨迹 |
 | `agent tailor <job_id>` | 为某个岗位定制简历（选材 + 渲染 + 幻觉校验） |
 | `agent resume list` | 列出简历版本；`approve <id>` 过审核门 |
+| `agent schedules` | 列出定时任务；`run --schedule <名字>` 跑一个 |
 
 `agent fetch` 的开关：`--explain` 显示初筛丢弃原因和样本（调过滤条件全靠它）、
 `--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Telegram。
@@ -233,6 +234,24 @@ JD 里藏的指令说服了它也无处可施。
 同一份数据支撑三件事：复盘（那条状态为什么被改了）、按任务拆账
 （哪个定时任务在烧钱）、以及**权限毕业计数**——某个 GATED 工具被批准过
 多少次而没出事，决定它能不能降到 WRITE。
+
+### 定时任务：行为住在文件里
+
+`config/schedules.yaml` 定义具名任务——提示词 + 工具集 + 预算：
+
+```bash
+./.venv/Scripts/agent.exe run --schedule daily-jobs
+```
+
+**为什么不直接在 cron 命令行里写提示词**：提示词是会改变 agent 行为的东西，
+写在命令行里改一次就没有历史，你没法 diff、没法回滚。落成文件之后它和
+`target_profile.yaml` 一样是可版本化的工件。
+
+**按工具名收窄的主要收益是爆炸半径，不是省 token**（实测每轮省约 1,500 tokens，
+月省 $2 出头）。`daily-jobs` 只拿到 7 个工具，`record_application` /
+`tailor_resume` / `append_event` 在结构上够不着——哪怕它被 JD 里的注入内容说服了。
+
+工具名写错会直接报错，不会静默少给一个。
 
 ### 预算是硬的
 

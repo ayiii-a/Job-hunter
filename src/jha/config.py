@@ -23,6 +23,7 @@ DATA_DIR = ROOT / "data"
 MASTER_PROFILE_PATH = CONFIG_DIR / "master_profile.yaml"
 TARGET_PROFILE_PATH = CONFIG_DIR / "target_profile.yaml"
 COMPANIES_PATH = CONFIG_DIR / "companies.yaml"
+SCHEDULES_PATH = CONFIG_DIR / "schedules.yaml"
 
 # 只有 *.example.yaml 进 git。真实文件里有你的姓名、电话、住址和完整履历，
 # 留在本机（见 .gitignore）。代价是简历没有 git 版本历史——要的话自己另外备份。
@@ -30,6 +31,7 @@ CONFIG_TEMPLATES: tuple[tuple[Path, Path], ...] = (
     (CONFIG_DIR / "master_profile.example.yaml", MASTER_PROFILE_PATH),
     (CONFIG_DIR / "target_profile.example.yaml", TARGET_PROFILE_PATH),
     (CONFIG_DIR / "companies.example.yaml", COMPANIES_PATH),
+    (CONFIG_DIR / "schedules.example.yaml", SCHEDULES_PATH),
 )
 
 load_dotenv(ROOT / ".env")

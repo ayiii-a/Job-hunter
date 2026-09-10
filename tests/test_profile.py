@@ -8,7 +8,11 @@ import pytest
 
 from jha import config, profile
 
-MASTER_EXAMPLE, TARGET_EXAMPLE, COMPANIES_EXAMPLE = (t for t, _ in config.CONFIG_TEMPLATES)
+# 按名字取，不按位置解包——CONFIG_TEMPLATES 每加一个模板就会断的写法不要用
+_EXAMPLES = {t.name: t for t, _ in config.CONFIG_TEMPLATES}
+MASTER_EXAMPLE = _EXAMPLES["master_profile.example.yaml"]
+TARGET_EXAMPLE = _EXAMPLES["target_profile.example.yaml"]
+COMPANIES_EXAMPLE = _EXAMPLES["companies.example.yaml"]
 
 
 def minimal():
