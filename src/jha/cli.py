@@ -571,6 +571,104 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# resume —— 定制、看 diff、审核门
+# ---------------------------------------------------------------------------
+
+def cmd_tailor(args: argparse.Namespace) -> int:
+    from . import tailor as tailor_mod
+    from .agent import MissingAPIKey
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        res = tailor_mod.tailor_resume(conn, args.job_id, max_pages=args.max_pages)
+    except (MissingAPIKey, ValueError) as exc:
+        conn.close()
+        _err(str(exc))
+        return 1
+    conn.close()
+
+    if res.error:
+        _err(res.error)
+        return 1
+
+    print(f"岗位 #{res.job_id} → 简历版本 #{res.resume_version_id}\n")
+    print(res.diff)
+    print()
+    if res.rationale:
+        print(f"选材理由：{res.rationale}\n")
+
+    if res.page_count:
+        fits = res.page_count <= args.max_pages
+        (_ok if fits else _warn)(
+            f"{res.page_count} 页" + ("" if fits else f"（压不到 {args.max_pages} 页，砍无可砍）")
+        )
+    if res.dropped_for_length:
+        _warn(f"为压页数砍掉 {len(res.dropped_for_length)} 条：{', '.join(res.dropped_for_length)}")
+
+    if res.verify_ok:
+        _ok("幻觉校验通过：产出物里没有母简历以外的数字或专名")
+    else:
+        _err("幻觉校验未通过——**不要投这一版**")
+        for p in res.verify_problems:
+            print(f"      {p}")
+
+    if res.pdf_path:
+        print(f"\n  PDF   {res.pdf_path}")
+    if res.html_path:
+        print(f"  HTML  {res.html_path}")
+
+    print(f"\n这一版**还没过审核门**。看完 diff 和 PDF 之后：")
+    print(f"  agent resume approve {res.resume_version_id}")
+    return 0
+
+
+def cmd_resume_approve(args: argparse.Namespace) -> int:
+    from . import tailor as tailor_mod
+
+    conn = db.connect()
+    db.init_db(conn)
+    row = tailor_mod.get_version(conn, args.resume_version_id)
+    if row is None:
+        conn.close()
+        _err(f"没有 id 为 {args.resume_version_id} 的简历版本")
+        return 1
+    if row.get("approved_at"):
+        conn.close()
+        _ok(f"#{args.resume_version_id} 早就批准过了（{row['approved_at']}）")
+        return 0
+
+    print(row.get("diff_summary") or "")
+    print(f"\n  PDF {row.get('rendered_pdf_path') or '(无)'}  ·  {row.get('page_count')} 页")
+    tailor_mod.approve(conn, args.resume_version_id)
+    conn.close()
+    _ok(f"#{args.resume_version_id} 已批准，可以拿去投了")
+    return 0
+
+
+def cmd_resume_list(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    db.init_db(conn)
+    rows = conn.execute(
+        "SELECT rv.id, rv.page_count, rv.approved_at, rv.created_at, "
+        "j.title, c.name AS company FROM resume_versions rv "
+        "LEFT JOIN jobs j ON j.id = rv.generated_for_job_id "
+        "LEFT JOIN companies c ON c.id = j.company_id "
+        "ORDER BY rv.created_at DESC LIMIT ?", (args.limit,)
+    ).fetchall()
+    conn.close()
+    if not rows:
+        _warn("还没有生成过简历版本。先 agent tailor <job_id>")
+        return 0
+    for r in rows:
+        mark = "✓" if r["approved_at"] else "·"
+        state = "已批准" if r["approved_at"] else "待审核"
+        print(f" {mark} #{r['id']:<4} {state}  {r['page_count'] or '?'} 页  "
+              f"{(r['company'] or ''):<12} {(r['title'] or '')[:44]}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # status rebuild
 # ---------------------------------------------------------------------------
 
@@ -668,6 +766,20 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--schedule", help="只看某个定时任务")
     rs.add_argument("--show", type=int, metavar="ID", help="展开某次 run 的完整轨迹")
     rs.set_defaults(func=cmd_runs)
+
+    ta = sub.add_parser("tailor", help="为某个岗位定制简历（选材 + 渲染 + 幻觉校验）")
+    ta.add_argument("job_id", type=int)
+    ta.add_argument("--max-pages", type=int, default=1)
+    ta.set_defaults(func=cmd_tailor)
+
+    re_ = sub.add_parser("resume", help="简历版本与审核门")
+    resub = re_.add_subparsers(dest="sub", required=True)
+    rl = resub.add_parser("list", help="列出已生成的版本")
+    rl.add_argument("--limit", type=int, default=20)
+    rl.set_defaults(func=cmd_resume_list)
+    rap = resub.add_parser("approve", help="批准一个版本（审核门；agent 没有这个能力）")
+    rap.add_argument("resume_version_id", type=int)
+    rap.set_defaults(func=cmd_resume_approve)
 
     an = sub.add_parser("analyze", help="直接跑第二层 JD 分析（不经过 agent loop）")
     an.add_argument("--limit", type=int, default=25)

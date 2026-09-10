@@ -6,7 +6,7 @@
 > 所以 `config/*.yaml`、`.env`、`data/` 全部在 `.gitignore` 里，仓库中只保留 `*.example.yaml`。
 > 代价是简历没有 git 版本历史——要的话自己另外备份（Phase 7 会加每日备份）。
 
-当前进度：**Phase 0（骨架）+ Phase 1（岗位监控）+ Agent loop + Phase 2（JD 分析）完成**。
+当前进度：**Phase 0 + Phase 1 + Agent loop + Phase 2（JD 分析）+ Phase 3（简历定制）完成**。
 JD 分析、简历定制、邮件、面试模拟尚未实现。
 
 ---
@@ -99,6 +99,8 @@ cp .env.example .env
 | `agent spend` | 按用途和任务拆 LLM 成本，含权限毕业计数 |
 | `agent analyze` | 直接跑 JD 分析（第二层，不经过 agent loop） |
 | `agent runs` | 看 agent 干过什么；`--show <id>` 展开完整轨迹 |
+| `agent tailor <job_id>` | 为某个岗位定制简历（选材 + 渲染 + 幻觉校验） |
+| `agent resume list` | 列出简历版本；`approve <id>` 过审核门 |
 
 `agent fetch` 的开关：`--explain` 显示初筛丢弃原因和样本（调过滤条件全靠它）、
 `--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Telegram。
@@ -191,6 +193,34 @@ agent loop 每轮重发完整对话历史，所以让 agent 逐条读 JD 的成�
 **分层顺带解决了注入**：读 JD 全文的第二层模型手里一个工具都没有——
 JD 里藏的指令说服了它也无处可施。
 
+### 防幻觉：三道结构性保证
+
+定制简历是这个项目最容易翻车的地方——一次编造被面试官问出来就全盘皆输。
+所以保证不写在 prompt 里，写在结构里：
+
+1. **选材 schema 里没有文本字段**，模型只能给 bullet id
+2. **渲染器只认 id**，从母简历逐字取原文——模型给的字符串进不了成品
+3. **最终闸门查产出物**，出现母简历以外的数字或专名就拒
+
+第 2 道最硬：前两道都被绕过，渲染器也拿不出母简历里没有的句子。
+校验器（`src/jha/verify.py`）全部是确定性代码，不是第二次 LLM 调用——
+**安全阀不该建在会随机放水的组件上。**
+
+一页约束同理，是**量出来的**不是 prompt 说的：渲染 → 数 PDF 页数 →
+按超出比例砍（先砍没数字的）→ 重渲。砍无可砍时如实报页数，不悄悄截断。
+
+```bash
+./.venv/Scripts/agent.exe tailor 12
+```
+
+生成的版本**未经审核**。`approve_resume` 刻意不是 agent 的工具——
+审核门如果 agent 能自己过，那就不是门。而且它有牙齿：
+把未审核的版本绑到投递记录上会直接报错。
+
+```bash
+./.venv/Scripts/agent.exe resume approve 1
+```
+
 ### 轨迹留痕
 
 每次 run 写 `agent_runs` / `agent_steps`。无人值守跑却查不到它干了什么，
@@ -254,6 +284,9 @@ src/jha/    schema.sql, db.py, status.py, profile.py, cli.py
   agent/    tools.py（注册表=安全边界）, loop.py（主循环）
             client.py（记账+预算+第二层调用）, persistence.py（轨迹留痕）
   analyze.py  Phase 2 第二层分析器（不在 agent loop 里）
+  tailor.py   Phase 3 选材（只输出 bullet id）
+  render.py   HTML 模板 → Playwright PDF + 一页约束循环
+  verify.py   确定性幻觉校验器
   sources/  三个 ATS 适配器 + RawJob 归一化
   tools/    resolve_ats.py
             filters.py（规则初筛）, ingest.py（抓取管线）, notify.py

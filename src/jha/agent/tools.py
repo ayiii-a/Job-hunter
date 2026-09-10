@@ -10,6 +10,8 @@
     send_email / reply  —— 没有。邮件模块只会实现读取路径
     open_url / click    —— 没有。邮件里的链接原样呈现给你，agent 不点
     delete_* / update_event —— 没有。events 表连数据库层面都禁止改删
+    approve_resume      —— 没有。审核门如果 agent 能自己过，那就不是门。
+                          它只在 CLI 里：agent resume approve <id>
 
 模型再怎么被 JD 或邮件正文里的注入内容诱导，也调不出不存在的函数。
 **加工具之前先问一句：这个能力被滥用的最坏后果是什么。**
@@ -32,7 +34,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable
 
-from .. import analyze, db, ingest, notify, profile
+from .. import analyze, db, ingest, notify, profile, tailor
 
 
 class Permission(str, Enum):
@@ -335,6 +337,7 @@ def shortlist_job(conn: sqlite3.Connection, job_id: int, shortlisted: bool = Tru
                 "type": "string",
                 "enum": ["referral", "company_site", "ats_direct", "recruiter", "other"],
             },
+            "resume_version_id": INT,
             "applied_at": STR,
             "notes": STR,
         },
@@ -345,6 +348,7 @@ def record_application(
     conn: sqlite3.Connection,
     job_id: int,
     applied_via: str,
+    resume_version_id: int | None = None,
     applied_at: str | None = None,
     notes: str | None = None,
 ) -> dict:
@@ -353,10 +357,25 @@ def record_application(
     if conn.execute("SELECT 1 FROM applications WHERE job_id = ?", (job_id,)).fetchone():
         raise ValueError(f"岗位 {job_id} 已经有投递记录了")
 
+    # 审核门要有牙齿：未审核的简历版本不许被绑到投递记录上。
+    # 否则「人工审核」就只是个没人查的字段。
+    if resume_version_id is not None:
+        rv = conn.execute(
+            "SELECT approved_at FROM resume_versions WHERE id = ?", (resume_version_id,)
+        ).fetchone()
+        if rv is None:
+            raise ValueError(f"没有 id 为 {resume_version_id} 的简历版本")
+        if not rv["approved_at"]:
+            raise ValueError(
+                f"简历版本 {resume_version_id} 还没过审核门。"
+                "先让用户看 diff 再 agent resume approve —— agent 不能自己批准"
+            )
+
     ts = applied_at or datetime.now().isoformat(sep=" ", timespec="seconds")
     cur = conn.execute(
-        "INSERT INTO applications (job_id, applied_at, applied_via, notes) VALUES (?,?,?,?)",
-        (job_id, ts, applied_via, notes),
+        "INSERT INTO applications (job_id, resume_version_id, applied_at, applied_via, notes) "
+        "VALUES (?,?,?,?,?)",
+        (job_id, resume_version_id, ts, applied_via, notes),
     )
     app_id = int(cur.lastrowid)
     db.append_event(conn, app_id, "applied", occurred_at=datetime.fromisoformat(ts), source="agent")
@@ -481,6 +500,58 @@ def rank_jobs(
     out.sort(key=lambda x: (order.get(x["verdict"], 9), x["referral"] is None,
                             -(x["match_score"] or 0)))
     return out[: min(int(limit), 100)]
+
+
+@tool(
+    "tailor_resume",
+    "为某个岗位定制一份简历：从母简历按 bullet id 选材、渲染 PDF、量页数、跑幻觉校验。"
+    "生成的版本**未经审核**，必须由人看过 diff 后在 CLI 里批准才能投出去。",
+    Permission.WRITE,
+    _obj({"job_id": INT, "max_pages": INT}, ["job_id"]),
+)
+def tailor_resume(conn: sqlite3.Connection, job_id: int, max_pages: int = 1) -> dict:
+    return tailor.tailor_resume(conn, job_id, max_pages=max(1, min(int(max_pages), 2))).compact()
+
+
+@tool(
+    "get_resume_version",
+    "取某个简历版本：选中了哪些 bullet、页数、diff、有没有通过审核。",
+    Permission.READ,
+    _obj({"resume_version_id": INT}, ["resume_version_id"]),
+)
+def get_resume_version(conn: sqlite3.Connection, resume_version_id: int) -> dict:
+    out = tailor.get_version(conn, resume_version_id)
+    if out is None:
+        raise ValueError(f"没有 id 为 {resume_version_id} 的简历版本")
+    out["approved"] = bool(out.get("approved_at"))
+    return out
+
+
+@tool(
+    "list_resume_versions",
+    "列出已生成的简历版本。approved=false 的还没过审核门，不能拿去投。",
+    Permission.READ,
+    _obj({"job_id": INT, "limit": INT}),
+)
+def list_resume_versions(
+    conn: sqlite3.Connection, job_id: int | None = None, limit: int = 25
+) -> list[dict]:
+    sql = (
+        "SELECT rv.id, rv.generated_for_job_id, rv.page_count, rv.approved_at, "
+        "rv.created_at, j.title, c.name AS company FROM resume_versions rv "
+        "LEFT JOIN jobs j ON j.id = rv.generated_for_job_id "
+        "LEFT JOIN companies c ON c.id = j.company_id WHERE 1=1 "
+    )
+    params: list[Any] = []
+    if job_id:
+        sql += "AND rv.generated_for_job_id = ? "
+        params.append(job_id)
+    sql += "ORDER BY rv.created_at DESC LIMIT ?"
+    params.append(min(int(limit), 100))
+    return [
+        {**dict(r), "approved": bool(r["approved_at"])}
+        for r in conn.execute(sql, params)
+    ]
 
 
 # ---------------------------------------------------------------------------

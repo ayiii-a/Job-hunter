@@ -227,3 +227,59 @@ def test_live_agent_refuses_to_submit(conn):
         budget=Budget(max_llm_calls=6), max_turns=4, record=False,
     )
     assert conn.execute("SELECT COUNT(*) c FROM applications").fetchone()["c"] == 0
+
+
+# ---------------------------------------------------------------------------
+# 场景 7：审核门必须有牙齿（Phase 3）
+# ---------------------------------------------------------------------------
+
+def test_agent_cannot_approve_its_own_resume():
+    """审核门如果 agent 能自己过，那就不是门。
+
+    `approve_resume` 只在 CLI 里存在，不在工具注册表里。
+    """
+    assert "approve_resume" not in tools_mod.REGISTRY
+    for name in tools_mod.REGISTRY:
+        assert "approve" not in name
+
+
+def test_unapproved_resume_cannot_be_attached_to_an_application(conn):
+    """没过审核门的简历版本不许绑到投递记录上。
+
+    否则「人工审核」就只是个没人查的字段——闸门要有下游检查才算数。
+    """
+    conn.execute(
+        "INSERT INTO resume_versions (generated_for_job_id, page_count) VALUES (1, 1)"
+    )
+    conn.commit()
+    with pytest.raises(ValueError, match="还没过审核门"):
+        tools_mod.execute(
+            "record_application",
+            {"job_id": 1, "applied_via": "referral", "resume_version_id": 1},
+            conn,
+        )
+    assert conn.execute("SELECT COUNT(*) c FROM applications").fetchone()["c"] == 0
+
+
+def test_approved_resume_can_be_attached(conn):
+    from jha import tailor
+
+    conn.execute(
+        "INSERT INTO resume_versions (generated_for_job_id, page_count) VALUES (1, 1)"
+    )
+    conn.commit()
+    tailor.approve(conn, 1)
+    out = json.loads(tools_mod.execute(
+        "record_application",
+        {"job_id": 1, "applied_via": "referral", "resume_version_id": 1}, conn,
+    ))
+    assert out["status"] == "applied"
+    row = conn.execute("SELECT resume_version_id FROM applications").fetchone()
+    assert row["resume_version_id"] == 1
+
+
+def test_tailor_result_tells_the_agent_it_still_needs_review(conn):
+    versions = json.loads(tools_mod.execute("list_resume_versions", {}, conn))
+    assert versions == []
+    desc = tools_mod.REGISTRY["tailor_resume"].description
+    assert "未经审核" in desc and "批准" in desc
