@@ -489,7 +489,57 @@ applied → oa → phone_screen → interview_loop → onsite → offer
 
 ---
 
-### Phase 4 — Tracking 表（1 周）
+### Phase 4 — Tracking 表（工具组）✅ 已完成
+
+**工具**
+
+| 工具 | 权限 | 干什么 |
+|---|---|---|
+| `get_tracking` | READ | 追踪表 + 每条的**下一步**（规则算的） |
+| `check_confirmations` | READ | 投出去 24h 还没收到确认邮件的 |
+| `mark_confirmed` | WRITE | 记下确认邮件到了，同时追加事件 |
+| `draft_answers` | READ | 申请表问题起草，三档处理（见下） |
+
+**命令**：`agent applied` / `confirm` / `board` / `export` / `answers`
+
+#### 自定义问题分三档，不是两档
+
+路线图原来写「绝不自动回答法律相关问题」。实现时发现这四个字里混了**两类性质不同**的东西，
+合在一起处理会出错：
+
+| 档 | 什么问题 | 怎么处理 |
+|---|---|---|
+| `VERBATIM` | 工作授权、签证、薪资、到岗时间 | **照抄 qa_bank 原文，一个字不改**，永不过 LLM。这些是你写好的事实陈述 |
+| `NEVER` | EEO 自愿披露（种族/性别/退伍/残障）、犯罪记录 | **一个字都不填，连 qa_bank 都不查**。这些只有你本人能决定填不填 |
+| `DRAFT` / `UNCOVERED` | 其余开放题 | qa_bank 覆盖了就套模板并标待审；没覆盖就留空标红，**绝不凭空起草** |
+
+分档是确定性正则，不问 LLM——判断「这是不是 EEO 问题」本身就不该交给一个可能判错的组件。
+
+> **实测教训**：第一版 EEO 正则写成 `\bdisabilit\b`，匹配不上 "disability"（后面还是单词字符），
+> 残障问题掉进了 `UNCOVERED`。**词边界两个方向都能咬人**——太松会误伤
+> （`India` 匹配 `Indianapolis`），太紧会漏网。现在有 12 个变体的参数化测试守着。
+
+#### 每日上限：agent 不能突破，人可以
+
+`record_application` 工具超限直接报错；CLI 的 `agent applied --force` 可以。
+上限的用途不是省力，是**逼你投得准**——一天 8 家才有时间给每家写像样的
+「Why this company」、查内推、看 JD。让 agent 自己决定要不要超，等于这条限制不存在。
+
+#### Google Sheet
+
+`agent export` 默认导 **TSV**（不是 CSV）：贴进 Sheet 自动分列，不用走导入向导，
+而且不会被岗位标题里的逗号搞乱（"Software Engineer, Frontend" 是常态）。
+
+`agent export --sheet` 走 Sheets API 全量写入。用 **service account** 而不是 OAuth——
+Sheets 不像 Gmail，服务账号可以直接访问共享给它的表格，**没有 Testing 模式下
+refresh token 每 7 天过期的问题**，设置一次永久有效。需要你做一次 GCP 配置。
+
+> 这条路径的 gspread 调用**没有自动化测试覆盖**（需要真凭证）。
+> 行构造逻辑是共享且测过的，未覆盖的只有几行 API 调用。
+
+---
+
+### Phase 4 原始设计（保留供对照）
 
 > **执行顺序提醒**：这个 Phase 排在 Phase 5 之后。原来和它捆在一起的表单预填已拆成独立的 **Phase 4.5 并移出关键路径**，理由见下。
 
@@ -761,8 +811,8 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
 | **轨迹持久化** | ✅ 完成 | `agent_runs` / `agent_steps`；`agent runs --show` 复盘；按任务拆账；权限毕业计数 |
 | **Phase 3 简历定制** | ✅ 完成 | 一键生成定制简历；三道防幻觉保证；一页约束量出来的；审核门有牙齿 |
 | Phase 6 面试模拟 | ← 下一个，1 周 | 零依赖；而且能反过来逼出你缺失的 bullet 数字 |
-| Phase 5 邮件 | 2 周 | `email-sweep` 自动分类、更新 tracking、面试提醒 |
-| Phase 4 Tracking | 1 周 | 投递落库、Sheet 同步、确认邮件告警 |
+| **Phase 4 Tracking** | ✅ 完成 | 投递落库、追踪表、确认邮件告警、问题起草、每日上限 |
+| Phase 5 邮件 | ← 下一个，2 周 | `email-sweep` 自动分类、更新 tracking、面试提醒 |
 | Phase 7 运营 | 持续 | `weekly-review` 复盘、调参 |
 | Phase 4.5 表单预填 | 按需 | **只在确认它真是瓶颈之后才做** |
 

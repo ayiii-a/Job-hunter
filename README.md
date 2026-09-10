@@ -6,7 +6,7 @@
 > 所以 `config/*.yaml`、`.env`、`data/` 全部在 `.gitignore` 里，仓库中只保留 `*.example.yaml`。
 > 代价是简历没有 git 版本历史——要的话自己另外备份（Phase 7 会加每日备份）。
 
-当前进度：**Phase 0 + Phase 1 + Agent loop + Phase 2（JD 分析）+ Phase 3（简历定制）完成**。
+当前进度：**Phase 0 · 1 · 2 · 3 · 4 + Agent loop 完成**。剩 Phase 5（邮件）和 Phase 6（面试模拟）。
 JD 分析、简历定制、邮件、面试模拟尚未实现。
 
 ---
@@ -102,6 +102,11 @@ cp .env.example .env
 | `agent tailor <job_id>` | 为某个岗位定制简历（选材 + 渲染 + 幻觉校验） |
 | `agent resume list` | 列出简历版本；`approve <id>` 过审核门 |
 | `agent schedules` | 列出定时任务；`run --schedule <名字>` 跑一个 |
+| `agent applied <job_id>` | 记录一次**你已手动投完**的投递 |
+| `agent board` | 追踪表 + 下一步建议 + 确认邮件告警 |
+| `agent confirm <id>` | 记下确认邮件到了 |
+| `agent export` | 导出 TSV，可直接粘进 Google Sheet |
+| `agent answers <job_id>` | 申请表自定义问题起草 |
 
 `agent fetch` 的开关：`--explain` 显示初筛丢弃原因和样本（调过滤条件全靠它）、
 `--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Telegram。
@@ -235,6 +240,34 @@ JD 里藏的指令说服了它也无处可施。
 （哪个定时任务在烧钱）、以及**权限毕业计数**——某个 GATED 工具被批准过
 多少次而没出事，决定它能不能降到 WRITE。
 
+### 投递追踪
+
+```bash
+./.venv/Scripts/agent.exe applied 14 --via referral --referral Wei --resume-version 1
+./.venv/Scripts/agent.exe board
+```
+
+`board` 会算出每条投递的**下一步**（纯规则，不是模型猜的），并告警
+**投出去超过 24 小时还没收到确认邮件**的——确认邮件是「申请真的进系统了」
+的唯一地面真相，没有它就可能是白投。
+
+**每日上限 agent 不能突破，人可以**（`--force`）。上限的用途不是省力，
+是逼你投得准：一天 8 家才有时间给每家写像样的「Why this company」、查内推。
+
+### 申请表问题：三档处理
+
+```bash
+./.venv/Scripts/agent.exe answers 14 --question "Will you require sponsorship?"
+```
+
+| 档 | 处理 |
+|---|---|
+| 工作授权 / 签证 / 薪资 | **照抄 qa_bank 原文**，一个字不改，永不过 LLM |
+| EEO 自愿披露、犯罪记录 | **一个字都不填**，连 qa_bank 都不查 |
+| 其余 | 覆盖了就套模板标待审；没覆盖就留空，**绝不凭空起草** |
+
+分档是确定性正则——判断「这是不是 EEO 问题」不该交给一个可能判错的组件。
+
 ### 定时任务：行为住在文件里
 
 `config/schedules.yaml` 定义具名任务——提示词 + 工具集 + 预算：
@@ -304,6 +337,8 @@ src/jha/    schema.sql, db.py, status.py, profile.py, cli.py
             client.py（记账+预算+第二层调用）, persistence.py（轨迹留痕）
   analyze.py  Phase 2 第二层分析器（不在 agent loop 里）
   tailor.py   Phase 3 选材（只输出 bullet id）
+  tracking.py Phase 4 追踪表、确认告警、下一步、导出
+  questions.py Phase 4 申请表问题三档处理
   render.py   HTML 模板 → Playwright PDF + 一页约束循环
   verify.py   确定性幻觉校验器
   sources/  三个 ATS 适配器 + RawJob 归一化

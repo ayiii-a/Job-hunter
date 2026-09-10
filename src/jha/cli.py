@@ -9,6 +9,8 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from datetime import datetime
+from pathlib import Path
 from typing import Any
 
 from . import config, db, ingest, notify, profile
@@ -722,6 +724,197 @@ def cmd_resume_list(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Phase 4：投递记录与追踪
+# ---------------------------------------------------------------------------
+
+def cmd_applied(args: argparse.Namespace) -> int:
+    """记录一次【你已经手动投完】的投递。这个命令不会替你提交任何表单。"""
+    from . import tracking
+
+    conn = db.connect()
+    db.init_db(conn)
+
+    job = conn.execute(
+        "SELECT j.*, c.name AS company FROM jobs j "
+        "LEFT JOIN companies c ON c.id = j.company_id WHERE j.id = ?", (args.job_id,)
+    ).fetchone()
+    if job is None:
+        conn.close()
+        _err(f"没有 id 为 {args.job_id} 的岗位")
+        return 1
+    if conn.execute("SELECT 1 FROM applications WHERE job_id = ?", (args.job_id,)).fetchone():
+        conn.close()
+        _err(f"岗位 {args.job_id} 已经有投递记录了")
+        return 1
+
+    limit = tracking.daily_limit_status(conn)
+    if limit["exceeded"] and not args.force:
+        conn.close()
+        _err(f"今天已投 {limit['used']} 家，达到上限 {limit['limit']}")
+        _warn("上限的用途不是省力，是逼你投得准——确实要多投加 --force")
+        return 1
+
+    if args.resume_version:
+        rv = conn.execute(
+            "SELECT approved_at FROM resume_versions WHERE id = ?", (args.resume_version,)
+        ).fetchone()
+        if rv is None:
+            conn.close()
+            _err(f"没有 id 为 {args.resume_version} 的简历版本")
+            return 1
+        if not rv["approved_at"]:
+            conn.close()
+            _err(f"简历版本 {args.resume_version} 还没过审核门：agent resume approve {args.resume_version}")
+            return 1
+
+    contact_id = None
+    if args.referral:
+        row = conn.execute(
+            "SELECT id FROM contacts WHERE lower(name) = lower(?) AND company_id = ?",
+            (args.referral, job["company_id"]),
+        ).fetchone()
+        if row is None:
+            conn.close()
+            _err(f"{job['company']} 下没有叫「{args.referral}」的联系人")
+            return 1
+        contact_id = row["id"]
+
+    ts = datetime.now().isoformat(sep=" ", timespec="seconds")
+    cur = conn.execute(
+        "INSERT INTO applications (job_id, resume_version_id, referred_by_contact_id, "
+        "applied_at, applied_via, notes) VALUES (?,?,?,?,?,?)",
+        (args.job_id, args.resume_version, contact_id, ts, args.via, args.notes),
+    )
+    app_id = int(cur.lastrowid)
+    db.append_event(conn, app_id, "applied", source="manual")
+    after = tracking.daily_limit_status(conn)
+    conn.close()
+
+    _ok(f"投递 #{app_id}：{job['company']} — {job['title']}（{args.via}）")
+    if contact_id:
+        _ok(f"内推人：{args.referral}")
+    print(f"      今天 {after['used']}/{after['limit']}")
+    _warn("24 小时内没收到确认邮件的话，去 ATS 查一下是不是没投成功："
+          f"agent confirm {app_id}")
+    return 0
+
+
+def cmd_confirm(args: argparse.Namespace) -> int:
+    from . import tracking
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        out = tracking.mark_confirmed(conn, args.application_id)
+    except ValueError as exc:
+        conn.close()
+        _err(str(exc))
+        return 1
+    conn.close()
+    _ok(f"投递 #{out['application_id']} 已记录确认邮件（{out['confirmation_seen_at']}）")
+    return 0
+
+
+def cmd_board(args: argparse.Namespace) -> int:
+    from . import tracking
+
+    conn = db.connect()
+    db.init_db(conn)
+    rows = tracking.tracking_rows(conn)
+    missing = tracking.missing_confirmations(conn)
+    limit = tracking.daily_limit_status(conn)
+    conn.close()
+
+    if not rows:
+        _warn("还没有投递记录。投完之后：agent applied <job_id> --via referral")
+        return 0
+
+    print(f"{'id':>4}  {'公司':<14}{'岗位':<34}{'状态':<15}{'投递日':<12}{'渠道':<14}内推")
+    for r in rows:
+        print(f"{r.application_id:>4}  {r.company[:13]:<14}{r.title[:33]:<34}"
+              f"{(r.status or ''):<15}{(r.applied_at or '')[:10]:<12}"
+              f"{r.applied_via:<14}{r.referral}")
+
+    todo = [r for r in rows if r.next_step]
+    if todo:
+        print("\n下一步（规则算的，不是猜的）")
+        for r in todo:
+            print(f"  #{r.application_id} {r.company} — {r.next_step}")
+
+    if missing:
+        print()
+        _err(f"{len(missing)} 条投出去超过 24h 还没收到确认邮件：")
+        for m in missing:
+            print(f"      #{m['application_id']} {m['company']} — {m['title'][:40]}"
+                  f"（{m['hours_since']}h）")
+        print("      确认邮件是「申请真的进系统了」的唯一地面真相")
+
+    print(f"\n共 {len(rows)} 条 · 今天 {limit['used']}/{limit['limit']}")
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from . import tracking
+
+    conn = db.connect()
+    db.init_db(conn)
+    if args.sheet:
+        out = tracking.sync_to_sheet(conn)
+        conn.close()
+        if out.get("synced"):
+            _ok(f"已写入 Google Sheet：{out['rows']} 行")
+            return 0
+        _err(out.get("reason", "同步失败"))
+        return 1
+
+    path = tracking.export_file(conn, Path(args.out) if args.out else None,
+                                delimiter="," if args.csv else "\t")
+    n = len(tracking.tracking_rows(conn))
+    conn.close()
+    _ok(f"{n} 行 → {path}")
+    if not args.csv:
+        print("      TSV 可以直接全选复制、粘进 Google Sheet 自动分列")
+    print("      数据库是真相源，Sheet 只是只读视图——改 Sheet 不会回写")
+    return 0
+
+
+def cmd_answers(args: argparse.Namespace) -> int:
+    from . import questions
+
+    conn = db.connect()
+    db.init_db(conn)
+    job = conn.execute(
+        "SELECT j.title, c.name AS company FROM jobs j "
+        "LEFT JOIN companies c ON c.id = j.company_id WHERE j.id = ?", (args.job_id,)
+    ).fetchone()
+    conn.close()
+    if job is None:
+        _err(f"没有 id 为 {args.job_id} 的岗位")
+        return 1
+
+    qs = [q.strip() for q in config.read_text(args.questions).splitlines() if q.strip()] \
+        if args.questions else list(args.question or [])
+    if not qs:
+        _err("给几个问题：--question '...' 可以重复，或 --questions <每行一题的文件>")
+        return 1
+
+    answers = questions.answer_all(qs, company=job["company"] or "", role=job["title"] or "")
+    marks = {"verbatim": "✓", "never": "⛔", "draft": "~", "uncovered": "✗"}
+    for a in answers:
+        print(f"\n{marks[a.kind]} {a.question}")
+        if a.text:
+            for line in a.text.splitlines():
+                print(f"    {line}")
+        if a.note:
+            print(f"    · {a.note}")
+
+    s = questions.summarize(answers)
+    print(f"\n可直接粘贴 {s['ready_to_paste']} 题 · 需要你处理 {s['needs_you']} 题")
+    _warn("⛔ 那几题 agent 一个字都不填——自愿披露和法律敏感项只能你本人决定")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # status rebuild
 # ---------------------------------------------------------------------------
 
@@ -821,6 +1014,34 @@ def build_parser() -> argparse.ArgumentParser:
     rs.add_argument("--schedule", help="只看某个定时任务")
     rs.add_argument("--show", type=int, metavar="ID", help="展开某次 run 的完整轨迹")
     rs.set_defaults(func=cmd_runs)
+
+    ap = sub.add_parser("applied", help="记录一次【你已手动投完】的投递")
+    ap.add_argument("job_id", type=int)
+    ap.add_argument("--via", default="ats_direct",
+                    choices=["referral", "company_site", "ats_direct", "recruiter", "other"])
+    ap.add_argument("--referral", help="内推人姓名（要在 contacts 里存在）")
+    ap.add_argument("--resume-version", type=int, help="绑定的简历版本，必须已过审核门")
+    ap.add_argument("--notes")
+    ap.add_argument("--force", action="store_true", help="突破每日上限")
+    ap.set_defaults(func=cmd_applied)
+
+    cf = sub.add_parser("confirm", help="记下某条投递收到了确认邮件")
+    cf.add_argument("application_id", type=int)
+    cf.set_defaults(func=cmd_confirm)
+
+    sub.add_parser("board", help="投递追踪表 + 下一步建议 + 确认邮件告警").set_defaults(func=cmd_board)
+
+    ex = sub.add_parser("export", help="导出追踪表（TSV 可直接粘进 Google Sheet）")
+    ex.add_argument("--out", help="输出路径")
+    ex.add_argument("--csv", action="store_true", help="用逗号分隔（默认制表符）")
+    ex.add_argument("--sheet", action="store_true", help="直接写 Google Sheet（需先配服务账号）")
+    ex.set_defaults(func=cmd_export)
+
+    aw = sub.add_parser("answers", help="给申请表自定义问题起草答案")
+    aw.add_argument("job_id", type=int)
+    aw.add_argument("--question", action="append", help="一题，可重复")
+    aw.add_argument("--questions", help="每行一题的文件")
+    aw.set_defaults(func=cmd_answers)
 
     ta = sub.add_parser("tailor", help="为某个岗位定制简历（选材 + 渲染 + 幻觉校验）")
     ta.add_argument("job_id", type=int)

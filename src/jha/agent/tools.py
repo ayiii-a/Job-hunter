@@ -34,7 +34,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable
 
-from .. import analyze, db, ingest, notify, profile, tailor
+from .. import analyze, db, ingest, notify, profile, questions, tailor, tracking
 
 
 class Permission(str, Enum):
@@ -371,6 +371,17 @@ def record_application(
                 "先让用户看 diff 再 agent resume approve —— agent 不能自己批准"
             )
 
+    # 每日上限。**agent 不能突破，人可以**（CLI 的 --force）——
+    # 上限的用途不是省力，是逼你投得准：一天 8 家才有时间给每家写像样的
+    # 「Why this company」、查内推、看 JD。让 agent 自己决定要不要超，
+    # 等于这条限制不存在。
+    limit = tracking.daily_limit_status(conn)
+    if limit["exceeded"]:
+        raise ValueError(
+            f"今天已投 {limit['used']} 家，达到上限 {limit['limit']}。"
+            "agent 不能突破这个上限——确实要多投请用 agent applied <job_id> --force"
+        )
+
     ts = applied_at or datetime.now().isoformat(sep=" ", timespec="seconds")
     cur = conn.execute(
         "INSERT INTO applications (job_id, resume_version_id, applied_at, applied_via, notes) "
@@ -552,6 +563,71 @@ def list_resume_versions(
         {**dict(r), "approved": bool(r["approved_at"])}
         for r in conn.execute(sql, params)
     ]
+
+
+@tool(
+    "get_tracking",
+    "取投递追踪表：每条投递的状态、渠道、内推人、最近事件、简历版本，"
+    "以及**下一步该做什么**（由规则算出，不是猜的）。",
+    Permission.READ,
+    _obj({}),
+)
+def get_tracking(conn: sqlite3.Connection) -> dict:
+    rows = tracking.tracking_rows(conn)
+    return {
+        "count": len(rows),
+        "daily_limit": tracking.daily_limit_status(conn),
+        "rows": [
+            {"application_id": r.application_id, "company": r.company, "title": r.title,
+             "status": r.status, "applied_at": (r.applied_at or "")[:10],
+             "applied_via": r.applied_via, "referral": r.referral or None,
+             "last_event": r.last_event, "verdict": r.verdict,
+             "next_step": r.next_step or None}
+            for r in rows
+        ],
+    }
+
+
+@tool(
+    "check_confirmations",
+    "找出投出去超过 24 小时、仍没收到确认邮件的投递。"
+    "确认邮件是「申请真的进系统了」的唯一地面真相——没有它就可能是白投。",
+    Permission.READ,
+    _obj({"hours": INT}),
+)
+def check_confirmations(conn: sqlite3.Connection, hours: int = 24) -> dict:
+    missing = tracking.missing_confirmations(conn, hours=max(1, int(hours)))
+    return {"missing": missing, "count": len(missing)}
+
+
+@tool(
+    "mark_confirmed",
+    "记下某条投递收到了确认邮件。会同时追加一条 confirmation_received 事件。",
+    Permission.WRITE,
+    _obj({"application_id": INT}, ["application_id"]),
+)
+def mark_confirmed(conn: sqlite3.Connection, application_id: int) -> dict:
+    return tracking.mark_confirmed(conn, application_id)
+
+
+@tool(
+    "draft_answers",
+    "给申请表的自定义问题起草答案。"
+    "工作授权/签证/薪资类**只照抄 qa_bank 原文**；EEO 自愿披露类（种族、性别、"
+    "退伍、残障）**一个字都不填**；其余没被 qa_bank 覆盖的一律留空标红由用户填。"
+    "agent 绝不凭空编造答案。",
+    Permission.READ,
+    _obj({"questions": {"type": "array", "items": STR}, "company": STR, "role": STR},
+         ["questions"]),
+)
+def draft_answers(
+    conn: sqlite3.Connection, questions_: list[str] | None = None,
+    company: str = "", role: str = "", **kw
+) -> dict:
+    qs = questions_ if questions_ is not None else kw.get("questions") or []
+    return questions.summarize(
+        questions.answer_all(list(qs), company=company, role=role)
+    )
 
 
 # ---------------------------------------------------------------------------
