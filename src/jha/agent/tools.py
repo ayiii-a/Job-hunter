@@ -32,7 +32,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable
 
-from .. import db, ingest, notify, profile
+from .. import analyze, db, ingest, notify, profile
 
 
 class Permission(str, Enum):
@@ -134,11 +134,13 @@ def list_jobs(
 
 @tool(
     "get_job",
-    "取单个岗位的完整信息，包含 JD 全文，以及这家公司有没有可以内推的人。",
+    "取单个岗位的信息，以及这家公司有没有可以内推的人。"
+    "默认【不返回 JD 全文】——要做匹配判断请用 analyze_jobs，它在工具内部分析，"
+    "比把 JD 拉进对话便宜一个量级。只有需要引用原文时才 include_jd=true，且一次一条。",
     Permission.READ,
-    _obj({"job_id": INT}, ["job_id"]),
+    _obj({"job_id": INT, "include_jd": BOOL}, ["job_id"]),
 )
-def get_job(conn: sqlite3.Connection, job_id: int) -> dict:
+def get_job(conn: sqlite3.Connection, job_id: int, include_jd: bool = False) -> dict:
     row = conn.execute(
         "SELECT j.*, c.name AS company FROM jobs j "
         "LEFT JOIN companies c ON c.id = j.company_id WHERE j.id = ?",
@@ -147,6 +149,16 @@ def get_job(conn: sqlite3.Connection, job_id: int) -> dict:
     if row is None:
         raise ValueError(f"没有 id 为 {job_id} 的岗位")
     out = {k: row[k] for k in row.keys() if k != "company_id"}
+
+    # JD 全文默认不给：单条约 1,620 tokens，而 agent loop 每轮都要重发
+    # 完整历史，逐条拉进上下文的成本是复利的（读 20 条 8.3 倍）。见路线图 §1.1
+    jd = out.pop("jd_text", None) or ""
+    out["jd_chars"] = len(jd)
+    if include_jd:
+        out["jd_text"] = jd
+    else:
+        out["jd_preview"] = jd[:400]
+        out["jd_hint"] = "JD 全文未返回。要判断匹配度请用 analyze_jobs；确需原文再 include_jd=true"
     out["contacts"] = [
         dict(c)
         for c in conn.execute(
@@ -388,6 +400,87 @@ def append_event(
         "SELECT status FROM applications WHERE id = ?", (application_id,)
     ).fetchone()
     return {"application_id": application_id, "event": type, "status": status["status"] if status else None}
+
+
+@tool(
+    "analyze_jobs",
+    "分析岗位并给出匹配判定（strong_apply / apply / stretch / skip）+ gap 列表。"
+    "不传 job_ids 就分析所有还没分析过的。"
+    "分析在工具内部逐条进行，只返回紧凑结论——**不要为了做匹配判断而逐条拉 JD 全文**。",
+    Permission.WRITE,
+    _obj({"job_ids": {"type": "array", "items": INT}, "limit": INT}),
+)
+def analyze_jobs(
+    conn: sqlite3.Connection, job_ids: list[int] | None = None, limit: int = 25
+) -> dict:
+    results = analyze.analyze_jobs(conn, job_ids=job_ids, limit=min(int(limit), 60))
+    if not results:
+        return {"analyzed": 0, "note": "没有需要分析的岗位（可能都分析过了）"}
+    by_verdict: dict[str, int] = {}
+    for r in results:
+        by_verdict[r.verdict] = by_verdict.get(r.verdict, 0) + 1
+    return {
+        "analyzed": len(results),
+        "by_verdict": by_verdict,
+        "results": [r.compact() for r in results],
+    }
+
+
+@tool(
+    "get_analysis",
+    "取某个岗位的完整分析结果：技能要求、gap、red flags、JD 大白话讲解。",
+    Permission.READ,
+    _obj({"job_id": INT}, ["job_id"]),
+)
+def get_analysis(conn: sqlite3.Connection, job_id: int) -> dict:
+    out = analyze.get_analysis(conn, job_id)
+    if out is None:
+        raise ValueError(f"岗位 {job_id} 还没有分析结果，先调 analyze_jobs")
+    return out
+
+
+@tool(
+    "rank_jobs",
+    "把已分析的岗位按匹配档位和分数排序，附带该公司有没有内推线索。"
+    "档位相同的，有内推路径的排前面。",
+    Permission.READ,
+    _obj({"verdicts": {"type": "array", "items": STR}, "limit": INT}),
+)
+def rank_jobs(
+    conn: sqlite3.Connection, verdicts: list[str] | None = None, limit: int = 25
+) -> list[dict]:
+    order = {"strong_apply": 0, "apply": 1, "stretch": 2, "skip": 3}
+    wanted = verdicts or ["strong_apply", "apply", "stretch"]
+    rows = conn.execute(
+        "SELECT a.job_id, a.verdict, a.match_score, a.gaps_json, j.title, "
+        "j.location, j.salary_raw, j.url, c.name AS company, c.id AS cid "
+        "FROM job_analysis a JOIN jobs j ON j.id = a.job_id "
+        "LEFT JOIN companies c ON c.id = j.company_id "
+        "WHERE j.is_active = 1 AND a.scorer_version = ?",
+        (analyze.ANALYZER_VERSION,),
+    ).fetchall()
+
+    out = []
+    for r in rows:
+        if r["verdict"] not in wanted:
+            continue
+        contacts = [
+            dict(x) for x in conn.execute(
+                "SELECT name, relationship, strength FROM contacts WHERE company_id = ? "
+                "ORDER BY strength DESC", (r["cid"],)
+            )
+        ]
+        out.append({
+            "job_id": r["job_id"], "company": r["company"], "title": r["title"],
+            "location": r["location"], "salary": r["salary_raw"], "url": r["url"],
+            "verdict": r["verdict"], "match_score": r["match_score"],
+            "gaps": db.load_json(r["gaps_json"])[:3],
+            "referral": [c["name"] for c in contacts] or None,
+        })
+    # 档位优先；同档位有内推的排前面 —— §0「内推优先」
+    out.sort(key=lambda x: (order.get(x["verdict"], 9), x["referral"] is None,
+                            -(x["match_score"] or 0)))
+    return out[: min(int(limit), 100)]
 
 
 # ---------------------------------------------------------------------------

@@ -20,11 +20,27 @@ DEFAULT_MAX_TOKENS = 4096
 
 #: 每百万 token 的价格（美元），仅用于本地估算，不是账单。
 #: 换模型时记得更新，否则成本统计会误导你。
+#:
+#: 别名要一起写进来：查不到价格时 `Budget.record` 会按 (0, 0) 算，
+#: 于是那部分调用的成本被**静默记成 $0**。分层设计里量最大的恰恰是 Haiku，
+#: 漏一个别名就等于整个第二层不计费——账面好看，实际不知道钱花在哪。
 PRICING: dict[str, tuple[float, float]] = {
     "claude-opus-5": (15.0, 75.0),
     "claude-sonnet-5": (3.0, 15.0),
+    "claude-haiku-4-5": (1.0, 5.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),
 }
+
+
+def price_of(model: str) -> tuple[float, float]:
+    """取价格；未知模型返回 (0,0) 但**留下痕迹**，不静默吞掉。"""
+    if model not in PRICING:
+        UNPRICED_MODELS.add(model)
+    return PRICING.get(model, (0.0, 0.0))
+
+
+#: 跑过但没有价格表的模型。`agent spend` 会把它列出来提醒你补。
+UNPRICED_MODELS: set[str] = set()
 
 
 class BudgetExceeded(RuntimeError):
@@ -60,7 +76,7 @@ class Budget:
         self.calls += 1
         self.input_tokens += inp
         self.output_tokens += out
-        rate_in, rate_out = PRICING.get(model, (0.0, 0.0))
+        rate_in, rate_out = price_of(model)
         cost = inp / 1e6 * rate_in + out / 1e6 * rate_out
         self.cost_usd += cost
         return cost
@@ -126,6 +142,60 @@ class AgentClient:
         if conn is not None:
             log_call(conn, purpose=purpose, model=self.model, inp=inp, out=out, cost=cost)
         return resp
+
+
+    def structured(
+        self,
+        *,
+        system: str,
+        user: str,
+        schema: dict[str, Any],
+        schema_name: str = "result",
+        budget: Budget | None = None,
+        conn: sqlite3.Connection | None = None,
+        purpose: str = "structured",
+        model: str | None = None,
+        ref_type: str | None = None,
+        ref_id: int | None = None,
+    ) -> dict[str, Any]:
+        """**第二层调用**：单条、独立上下文、不累积、拿结构化结果就走。
+
+        这是 §1.1 分层设计里的下层，用来处理 JD 全文、邮件正文这类大块不可信文本。
+
+        关于「第二层没有工具」和这里传了 `tools=` 的关系——**不矛盾，但值得讲清楚**：
+        这里的 schema 只是**输出模具**，用来强制模型按 JSON 结构作答。
+        它不经过 `tools_mod.execute`，没有任何东西会被执行，模型也拿不到
+        数据库或网络。所以注入内容即使说服了这一层，它也无处可施。
+
+        真正的区别在于：第一层的工具调用会**路由到执行器**，这一层不会。
+        """
+        budget = budget or Budget()
+        budget.check()
+        use_model = model or self.model
+        resp = self._ensure().messages.create(
+            model=use_model,
+            max_tokens=self.max_tokens,
+            system=system,
+            messages=[{"role": "user", "content": user}],
+            tools=[{
+                "name": schema_name,
+                "description": "按这个结构返回结果",
+                "input_schema": schema,
+            }],
+            tool_choice={"type": "tool", "name": schema_name},
+        )
+        usage = getattr(resp, "usage", None)
+        inp = getattr(usage, "input_tokens", 0) or 0
+        out = getattr(usage, "output_tokens", 0) or 0
+        cost = budget.record(use_model, inp, out)
+        if conn is not None:
+            log_call(conn, purpose=purpose, model=use_model, inp=inp, out=out,
+                     cost=cost, ref_type=ref_type, ref_id=ref_id)
+
+        for block in getattr(resp, "content", []) or []:
+            if getattr(block, "type", None) == "tool_use":
+                return dict(getattr(block, "input", {}) or {})
+        raise ValueError("模型没有按 schema 返回结果")
 
 
 def log_call(

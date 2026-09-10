@@ -26,7 +26,7 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 #: 后加的列。schema.sql 里已经有它们（新库直接建好），这份清单是给**已存在的库**
 #: 升级用的——`CREATE TABLE IF NOT EXISTS` 不会给旧表补列，跑起来只会在

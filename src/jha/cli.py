@@ -442,23 +442,131 @@ def cmd_tools(args: argparse.Namespace) -> int:
 
 
 def cmd_spend(args: argparse.Namespace) -> int:
-    from .agent import spend_summary
+    from .agent import UNPRICED_MODELS, approval_counts, cost_by_schedule, spend_summary
 
     conn = db.connect()
     db.init_db(conn)
     rows = spend_summary(conn, days=args.days)
+    by_task = cost_by_schedule(conn, days=args.days)
+    approvals = approval_counts(conn)
     conn.close()
-    if not rows:
+
+    if not rows and not by_task:
         _warn(f"最近 {args.days} 天没有 LLM 调用记录")
         return 0
-    print(f"最近 {args.days} 天\n")
-    print(f"  {'用途':<20} {'次数':>6} {'输入':>10} {'输出':>10} {'成本':>10}")
-    for r in rows:
+
+    if rows:
+        print(f"最近 {args.days} 天 · 按用途\n")
+        print(f"  {'用途':<20} {'次数':>6} {'输入':>10} {'输出':>10} {'成本':>10}")
+        for r in rows:
+            print(
+                f"  {r['purpose']:<20} {r['calls']:>6} {r['inp'] or 0:>10} "
+                f"{r['out'] or 0:>10} {'$' + str(r['cost'] or 0):>10}"
+            )
+        print(f"\n  合计 ${round(sum(r['cost'] or 0 for r in rows), 4)}")
+
+    if by_task:
+        # 定时任务跑起来之后，这才是「钱花在哪」的正确视图——
+        # purpose 只能说明花在哪类调用上，说不出是哪个任务触发的
+        print(f"\n最近 {args.days} 天 · 按任务\n")
+        print(f"  {'任务':<20} {'run':>5} {'LLM':>6} {'工具':>6} {'成本':>10}")
+        for r in by_task:
+            print(
+                f"  {r['name']:<20} {r['runs']:>5} {r['calls'] or 0:>6} "
+                f"{r['tools'] or 0:>6} {'$' + str(r['cost'] or 0):>10}"
+            )
+
+    gated = [a for a in approvals if a["denied"] or a["executed"]]
+    if gated:
+        print("\n工具调用次数（GATED 工具的「权限毕业」依据）\n")
+        for a in gated:
+            print(f"  {a['tool_name']:<22} 执行 {a['executed']:>4}  被拒 {a['denied']:>4}")
+
+    if UNPRICED_MODELS:
+        _warn(f"这些模型没有价格表，成本被记成 0：{sorted(UNPRICED_MODELS)}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# runs —— agent 干过什么
+# ---------------------------------------------------------------------------
+
+def cmd_runs(args: argparse.Namespace) -> int:
+    from .agent import recent_runs, run_steps
+
+    conn = db.connect()
+    db.init_db(conn)
+
+    if args.show:
+        row = conn.execute("SELECT * FROM agent_runs WHERE id = ?", (args.show,)).fetchone()
+        if row is None:
+            conn.close()
+            _err(f"没有 id 为 {args.show} 的 run")
+            return 1
+        steps = run_steps(conn, args.show)
+        conn.close()
+        print(f"#{row['id']}  {row['task']}")
+        print(f"  {row['started_at']} → {row['finished_at'] or '(未结束)'}  {row['stopped_because'] or ''}")
+        print(f"  {row['model']} · LLM {row['llm_calls']} 次 · 工具 {row['tool_calls']} 次 · ${row['cost_usd']}")
+        print("\n  轨迹")
+        for s in steps:
+            mark = {"tool_use": "→", "denied": "⛔", "error": "✗", "text": " "}.get(s["kind"], " ")
+            body = s["args_json"] or s["error"] or s["result_summary"] or ""
+            print(f"   {s['seq']:>3} {mark} {(s['tool_name'] or s['kind']):<20} {body[:90]}")
+        if row["final_text"]:
+            print(f"\n  结论\n   {row['final_text'][:600]}")
+        return 0
+
+    runs = recent_runs(conn, limit=args.limit, schedule=args.schedule)
+    conn.close()
+    if not runs:
+        _warn("还没有 agent run 记录")
+        return 0
+    print(f"{'id':>5}  {'开始':<20} {'任务':<38} {'工具':>5} {'成本':>9}")
+    for r in runs:
+        flag = "" if r["ok"] else " !"
         print(
-            f"  {r['purpose']:<20} {r['calls']:>6} {r['inp'] or 0:>10} "
-            f"{r['out'] or 0:>10} {'$' + str(r['cost'] or 0):>10}"
+            f"{r['id']:>5}  {(r['started_at'] or '')[:19]:<20} {r['task'][:36]:<38} "
+            f"{r['tool_calls']:>5} {'$' + str(round(r['cost_usd'] or 0, 4)):>9}{flag}"
         )
-    print(f"\n  合计 ${round(sum(r['cost'] or 0 for r in rows), 4)}")
+    print(f"\n看某次的完整轨迹：agent runs --show <id>")
+    return 0
+
+
+# ---------------------------------------------------------------------------
+# analyze —— 不经过 agent loop，直接跑第二层分析
+# ---------------------------------------------------------------------------
+
+def cmd_analyze(args: argparse.Namespace) -> int:
+    from . import analyze as analyze_mod
+    from .agent import MissingAPIKey
+
+    conn = db.connect()
+    db.init_db(conn)
+    pending = analyze_mod.pending_jobs(conn, limit=args.limit)
+    if not pending:
+        conn.close()
+        _ok("没有需要分析的岗位（都分析过了）")
+        return 0
+
+    print(f"待分析 {len(pending)} 个岗位，每个一次独立调用（{analyze_mod.ANALYZER_MODEL}）\n")
+    try:
+        results = analyze_mod.analyze_jobs(conn, limit=args.limit)
+    except MissingAPIKey as exc:
+        conn.close()
+        _err(str(exc))
+        return 1
+    conn.close()
+
+    by_verdict: dict[str, int] = {}
+    for r in results:
+        by_verdict[r.verdict] = by_verdict.get(r.verdict, 0) + 1
+        mark = {"strong_apply": "★", "apply": "+", "stretch": "~", "skip": "-"}.get(r.verdict, " ")
+        extra = f" 硬性排除：{r.hard_fail}" if r.hard_fail else ""
+        if r.error:
+            extra = f" ✗ {r.error}"
+        print(f"  {mark} #{r.job_id:<5} {r.verdict:<13} {(r.rationale or '')[:60]}{extra}")
+    print(f"\n  {by_verdict}")
     return 0
 
 
@@ -551,9 +659,19 @@ def build_parser() -> argparse.ArgumentParser:
 
     sub.add_parser("tools", help="列出 agent 能调用的工具和权限档").set_defaults(func=cmd_tools)
 
-    sp = sub.add_parser("spend", help="按用途拆 LLM 成本")
+    sp = sub.add_parser("spend", help="按用途和任务拆 LLM 成本")
     sp.add_argument("--days", type=int, default=30)
     sp.set_defaults(func=cmd_spend)
+
+    rs = sub.add_parser("runs", help="看 agent 干过什么（轨迹留痕）")
+    rs.add_argument("--limit", type=int, default=20)
+    rs.add_argument("--schedule", help="只看某个定时任务")
+    rs.add_argument("--show", type=int, metavar="ID", help="展开某次 run 的完整轨迹")
+    rs.set_defaults(func=cmd_runs)
+
+    an = sub.add_parser("analyze", help="直接跑第二层 JD 分析（不经过 agent loop）")
+    an.add_argument("--limit", type=int, default=25)
+    an.set_defaults(func=cmd_analyze)
 
     fe = sub.add_parser("fetch", help="抓取目标公司的新岗位")
     fe.add_argument("--company", help="只抓这一家")

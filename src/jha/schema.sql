@@ -235,10 +235,56 @@ CREATE INDEX IF NOT EXISTS idx_runs_ok      ON fetch_runs(ok, started_at);
 
 
 -- ---------------------------------------------------------------------------
+-- agent_runs / agent_steps —— agent 自己的追加式日志。
+--
+--   agent 之于自己，就像 events 之于投递。无人值守每天自动跑、还允许写库，
+--   却查不到它到底干了什么，这个组合不能上线。
+--
+--   有了它才能做三件事：
+--     复盘      那条状态为什么被改了 —— 翻 agent_steps
+--     按任务拆账 哪个定时任务在烧钱 —— agent_runs.cost_usd group by schedule_name
+--     权限毕业   某个 GATED 工具已经被批准过多少次而没出事（见 §0）
+-- ---------------------------------------------------------------------------
+CREATE TABLE IF NOT EXISTS agent_runs (
+    id             INTEGER PRIMARY KEY,
+    task           TEXT    NOT NULL,
+    schedule_name  TEXT,                          -- 定时任务名；手动跑则为 NULL
+    started_at     TEXT    NOT NULL DEFAULT (datetime('now')),
+    finished_at    TEXT,
+    ok             INTEGER,
+    stopped_because TEXT,
+    model          TEXT,
+    llm_calls      INTEGER NOT NULL DEFAULT 0,
+    input_tokens   INTEGER NOT NULL DEFAULT 0,
+    output_tokens  INTEGER NOT NULL DEFAULT 0,
+    cost_usd       REAL    NOT NULL DEFAULT 0,
+    tool_calls     INTEGER NOT NULL DEFAULT 0,
+    pending_approvals_json TEXT NOT NULL DEFAULT '[]',
+    final_text     TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_runs_started  ON agent_runs(started_at);
+CREATE INDEX IF NOT EXISTS idx_runs_schedule ON agent_runs(schedule_name, started_at);
+
+CREATE TABLE IF NOT EXISTS agent_steps (
+    id         INTEGER PRIMARY KEY,
+    run_id     INTEGER NOT NULL REFERENCES agent_runs(id) ON DELETE CASCADE,
+    seq        INTEGER NOT NULL,
+    kind       TEXT    NOT NULL,      -- text | tool_use | tool_result | denied | error
+    tool_name  TEXT,
+    args_json  TEXT,
+    result_summary TEXT,              -- 截断保存；全文在 jobs/emails 等原表里
+    error      TEXT,
+    created_at TEXT    NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX IF NOT EXISTS idx_steps_run  ON agent_steps(run_id, seq);
+CREATE INDEX IF NOT EXISTS idx_steps_tool ON agent_steps(tool_name, kind);
+
+
+-- ---------------------------------------------------------------------------
 -- schema 版本，为后面的迁移留口子
 -- ---------------------------------------------------------------------------
 CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-INSERT OR IGNORE INTO schema_version (version) VALUES (2);
+INSERT OR IGNORE INTO schema_version (version) VALUES (3);

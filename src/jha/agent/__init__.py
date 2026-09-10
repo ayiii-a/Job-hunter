@@ -3,11 +3,19 @@
 安全属性靠工具注册表保证，不靠 prompt —— 详见 tools.py 的模块说明。
 """
 
-from .client import AgentClient, Budget, BudgetExceeded, MissingAPIKey, spend_summary
+from .client import (
+    AgentClient, Budget, BudgetExceeded, MissingAPIKey,
+    UNPRICED_MODELS, price_of, spend_summary,
+)
 from .loop import RunResult, Step, run
+from .persistence import (
+    RunRecorder, approval_counts, cost_by_schedule, recent_runs, run_steps,
+)
 from .tools import REGISTRY, Permission
 
 __all__ = [
-    "AgentClient", "Budget", "BudgetExceeded", "MissingAPIKey", "spend_summary",
+    "AgentClient", "Budget", "BudgetExceeded", "MissingAPIKey",
+    "UNPRICED_MODELS", "price_of", "spend_summary",
     "RunResult", "Step", "run", "REGISTRY", "Permission",
+    "RunRecorder", "approval_counts", "cost_by_schedule", "recent_runs", "run_steps",
 ]

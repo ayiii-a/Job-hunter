@@ -211,6 +211,29 @@ def test_budget_tracks_tokens_and_cost():
     assert b.cost_usd == pytest.approx(3.0 + 1.5)
 
 
+def test_every_model_in_the_selection_plan_has_a_price():
+    """路线图 §1 的模型选型表里每个模型都必须能查到价格。
+
+    查不到时 Budget.record 按 (0,0) 算，那部分调用的成本被**静默记成 $0**。
+    分层设计里量最大的恰恰是 Haiku——漏一个别名就等于整个第二层不计费。
+    这个 bug 出现过一次：PRICING 里只有 claude-haiku-4-5-20251001，
+    而配置和文档用的是 claude-haiku-4-5。
+    """
+    from jha.agent.client import PRICING
+
+    for model in ("claude-sonnet-5", "claude-haiku-4-5", "claude-opus-5"):
+        assert model in PRICING, f"{model} 没有价格，它的成本会被静默记成 0"
+        assert all(rate > 0 for rate in PRICING[model])
+
+
+def test_unknown_model_is_recorded_not_swallowed():
+    from jha.agent.client import UNPRICED_MODELS, price_of
+
+    UNPRICED_MODELS.discard("made-up-model")
+    assert price_of("made-up-model") == (0.0, 0.0)
+    assert "made-up-model" in UNPRICED_MODELS
+
+
 def test_budget_check_raises_when_exhausted():
     b = B(max_llm_calls=1)
     b.record("claude-sonnet-5", 10, 10)

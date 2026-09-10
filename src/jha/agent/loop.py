@@ -25,6 +25,7 @@ from typing import Any, Callable
 
 from . import tools as tools_mod
 from .client import AgentClient, Budget, BudgetExceeded
+from .persistence import RunRecorder
 from .tools import Permission
 
 SYSTEM = """你是一个求职流水线的操作助手，服务的对象是一位 2026 年 12 月毕业、
@@ -72,6 +73,7 @@ class RunResult:
     stopped_because: str = "完成"
     budget: dict[str, Any] = field(default_factory=dict)
     pending_approvals: list[dict[str, Any]] = field(default_factory=list)
+    run_id: int | None = None
 
     @property
     def tool_calls(self) -> int:
@@ -97,11 +99,16 @@ def run(
     allow: set[Permission] | None = None,
     approve: Callable[[str, dict[str, Any]], bool] | None = None,
     on_step: Callable[[Step], None] | None = None,
+    schedule_name: str | None = None,
+    record: bool = True,
 ) -> RunResult:
     """跑一次 agent。
 
-    approve: GATED 工具的批准回调。返回 True 才执行。不传 = 一律拒绝。
-    allow:   进一步收窄本次可用的工具集（例如只给 READ 做一次只读巡检）。
+    approve:       GATED 工具的批准回调。返回 True 才执行。不传 = 一律拒绝。
+    allow:         进一步收窄本次可用的工具集（例如只给 READ 做一次只读巡检）。
+    schedule_name: 定时任务名，用来按任务拆账。手动跑就留空。
+    record:        写 agent_runs / agent_steps。默认开——无人值守跑却不留痕
+                   是不能接受的，只有测试才该关掉它。
     """
     client = client or AgentClient()
     budget = budget or Budget()
@@ -109,8 +116,13 @@ def run(
     specs = tools_mod.specs(allow)
     messages: list[dict[str, Any]] = [{"role": "user", "content": task}]
 
+    recorder = RunRecorder(conn, enabled=record)
+    recorder.start(task, model=getattr(client, "model", None), schedule_name=schedule_name)
+    result.run_id = recorder.run_id
+
     def emit(step: Step) -> None:
         result.steps.append(step)
+        recorder.step(step)
         if on_step:
             on_step(step)
 
@@ -176,4 +188,5 @@ def run(
         result.stopped_because = f"达到最大轮数 {max_turns}"
 
     result.budget = budget.summary()
+    recorder.finish(result)
     return result

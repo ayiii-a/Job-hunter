@@ -6,7 +6,7 @@
 > 所以 `config/*.yaml`、`.env`、`data/` 全部在 `.gitignore` 里，仓库中只保留 `*.example.yaml`。
 > 代价是简历没有 git 版本历史——要的话自己另外备份（Phase 7 会加每日备份）。
 
-当前进度：**Phase 0（骨架）+ Phase 1（岗位监控）+ Agent loop 基座完成**。
+当前进度：**Phase 0（骨架）+ Phase 1（岗位监控）+ Agent loop + Phase 2（JD 分析）完成**。
 JD 分析、简历定制、邮件、面试模拟尚未实现。
 
 ---
@@ -96,7 +96,9 @@ cp .env.example .env
 | `agent jobs show <id>` | 看单个岗位和 JD 全文 |
 | `agent run "<任务>"` | 跑 agent loop，模型自己决定调哪些工具 |
 | `agent tools` | 列出可用工具、权限档，以及**刻意不存在**的工具 |
-| `agent spend` | 按用途拆 LLM 成本 |
+| `agent spend` | 按用途和任务拆 LLM 成本，含权限毕业计数 |
+| `agent analyze` | 直接跑 JD 分析（第二层，不经过 agent loop） |
+| `agent runs` | 看 agent 干过什么；`--show <id>` 展开完整轨迹 |
 
 `agent fetch` 的开关：`--explain` 显示初筛丢弃原因和样本（调过滤条件全靠它）、
 `--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Telegram。
@@ -177,6 +179,31 @@ Greenhouse 的 `updated_at` 再省一层：第二次抓取时详情请求降到 
 三档权限：`READ` 随便调；`WRITE` 写本地库、允许自动执行（因为 events
 追加式可纠错）；`GATED` 外发动作，必须**单次**批准，不延续到下次。
 
+### 分层：重活不在 agent 上下文里做
+
+agent loop 每轮重发完整对话历史，所以让 agent 逐条读 JD 的成本是**复利**的——
+实测读 20 条是流水线的 8.3 倍，50 条 19.7 倍（$1.05 vs $0.13）。
+
+所以 JD 全文不进 agent 上下文：`analyze_jobs` 在**工具内部**逐条调 Haiku、
+独立上下文、只把 `{job_id, verdict, top_gaps}` 返回。`list_jobs` 根本不返回 JD，
+`get_job` 默认也不给，要原文得显式 `include_jd=true`。
+
+**分层顺带解决了注入**：读 JD 全文的第二层模型手里一个工具都没有——
+JD 里藏的指令说服了它也无处可施。
+
+### 轨迹留痕
+
+每次 run 写 `agent_runs` / `agent_steps`。无人值守跑却查不到它干了什么，
+这个组合不能上线。
+
+```bash
+./.venv/Scripts/agent.exe runs --show 3
+```
+
+同一份数据支撑三件事：复盘（那条状态为什么被改了）、按任务拆账
+（哪个定时任务在烧钱）、以及**权限毕业计数**——某个 GATED 工具被批准过
+多少次而没出事，决定它能不能降到 WRITE。
+
 ### 预算是硬的
 
 循环次数由模型决定，所以上限必须由代码给。`Budget` 限制 LLM 调用次数和
@@ -224,7 +251,9 @@ Windows 上 Python 默认编码是 cp1252，而 JD 文本里满是非 ASCII（�
 ```
 config/     *.example.yaml 进 git；同名的 *.yaml 是你的真实内容，不进 git
 src/jha/    schema.sql, db.py, status.py, profile.py, cli.py
-  agent/    tools.py（注册表=安全边界）, loop.py（主循环）, client.py（记账+预算）
+  agent/    tools.py（注册表=安全边界）, loop.py（主循环）
+            client.py（记账+预算+第二层调用）, persistence.py（轨迹留痕）
+  analyze.py  Phase 2 第二层分析器（不在 agent loop 里）
   sources/  三个 ATS 适配器 + RawJob 归一化
   tools/    resolve_ats.py
             filters.py（规则初筛）, ingest.py（抓取管线）, notify.py
