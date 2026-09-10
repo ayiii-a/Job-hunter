@@ -915,6 +915,147 @@ def cmd_answers(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# Phase 5：邮件
+# ---------------------------------------------------------------------------
+
+def cmd_mail_sweep(args: argparse.Namespace) -> int:
+    from .agent import MissingAPIKey
+    from .mail import pipeline as mp
+    from .mail.imap import MailError, MailReader
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        if not args.no_fetch:
+            fetched, new = mp.ingest(conn, MailReader(), since_days=args.since_days)
+            _ok(f"拉取 {fetched} 封，新增 {new} 封（只读：EXAMINE + BODY.PEEK，不会把邮件标成已读）")
+        rep = mp.process_pending(conn, limit=args.limit)
+    except (MailError, MissingAPIKey) as exc:
+        conn.close()
+        _err(str(exc))
+        return 1
+    conn.close()
+
+    print(f"  预过滤丢弃 {rep.filtered} · 分类 {rep.classified} · 自动写入 {rep.auto_applied}"
+          f" · 进人工队列 {rep.queued} · 忽略 {rep.ignored}")
+    for e in rep.errors:
+        _warn(e)
+    if rep.alerts:
+        print()
+        _err(f"{len(rep.alerts)} 封需要你尽快处理：")
+        for a in rep.alerts:
+            where = f"{a.get('company') or '?'} — {a.get('job_title') or '未匹配'}"
+            print(f"      #{a['email_id']} [{a.get('type')}] {where}")
+    if rep.queued:
+        print("\n  看队列：agent mail queue")
+    return 0
+
+
+def cmd_mail_queue(args: argparse.Namespace) -> int:
+    from .mail import pipeline as mp
+
+    conn = db.connect()
+    db.init_db(conn)
+    rows = mp.queue_for_human(conn)
+    conn.close()
+    if not rows:
+        _ok("人工确认队列是空的")
+        return 0
+    for r in rows:
+        where = f"{r['company']} — {r['job_title']}" if r["company"] else "未匹配到投递"
+        print(f"\n#{r['id']}  [{r['classification']}]  置信度 {round(r['confidence'] or 0, 2)}  {where}")
+        print(f"    主题：{(r['subject'] or '')[:90]}")
+        print(f"    发件：{(r['from_addr'] or '')[:70]}")
+        if r["summary"]:
+            print(f"    摘要：{r['summary'][:100]}")
+        for d in db.load_json(r["dates_json"]):
+            print(f"    日期原文：「{d.get('original')}」{('— ' + d['meaning']) if d.get('meaning') else ''}")
+        print(f"    为什么进队列：{r['reason']}")
+    print("\n确认：agent mail accept <id> [--application <投递id>]   驳回：agent mail dismiss <id>")
+    print("看链接和全文：agent mail show <id>")
+    return 0
+
+
+def cmd_mail_show(args: argparse.Namespace) -> int:
+    conn = db.connect()
+    db.init_db(conn)
+    r = conn.execute("SELECT * FROM emails WHERE id = ?", (args.email_id,)).fetchone()
+    conn.close()
+    if r is None:
+        _err(f"没有 id 为 {args.email_id} 的邮件")
+        return 1
+    print(f"#{r['id']}  {r['received_at'] or ''}")
+    print(f"发件：{r['from_addr']}\n主题：{r['subject']}")
+    print(f"分类：{r['classification'] or '(未分类)'}  置信度 {r['confidence']}  处理：{r['policy']}  "
+          f"队列：{r['review_status'] or '-'}")
+    if r["reason"]:
+        print(f"原因：{r['reason']}")
+    for d in db.load_json(r["dates_json"]):
+        print(f"日期原文：「{d.get('original')}」 {d.get('meaning') or ''}")
+    links = db.load_json(r["links_json"])
+    if links:
+        print("\n链接（原文。agent 不会打开它们——先确认是正规招聘域名再点）：")
+        for u in links:
+            print(f"  {u}")
+    print("\n" + "-" * 60)
+    print((r["body_text"] or "")[:3000])
+    return 0
+
+
+def cmd_mail_accept(args: argparse.Namespace) -> int:
+    from .mail import pipeline as mp
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        out = mp.accept(conn, args.email_id, application_id=args.application)
+    except ValueError as exc:
+        conn.close()
+        _err(str(exc))
+        return 1
+    conn.close()
+    _ok(f"邮件 #{out['email_id']} → 投递 #{out['application_id']} 追加 {out['event']}，"
+        f"当前状态 {out['status']}")
+    if out["event"] in ("interview_invite", "oa_invite", "offer_received"):
+        print(f"      面试准备材料：agent prep {out['application_id']}")
+    return 0
+
+
+def cmd_mail_dismiss(args: argparse.Namespace) -> int:
+    from .mail import pipeline as mp
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        mp.dismiss(conn, args.email_id, note=args.note or "")
+    except ValueError as exc:
+        conn.close()
+        _err(str(exc))
+        return 1
+    conn.close()
+    _ok(f"邮件 #{args.email_id} 已驳回，不改任何状态")
+    return 0
+
+
+def cmd_prep(args: argparse.Namespace) -> int:
+    from . import prep
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        path = prep.write(conn, args.application_id)
+    except ValueError as exc:
+        conn.close()
+        _err(str(exc))
+        return 1
+    conn.close()
+    text = config.read_text(path)
+    print(text)
+    _ok(f"已写入 {path}")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # status rebuild
 # ---------------------------------------------------------------------------
 
@@ -1042,6 +1183,30 @@ def build_parser() -> argparse.ArgumentParser:
     aw.add_argument("--question", action="append", help="一题，可重复")
     aw.add_argument("--questions", help="每行一题的文件")
     aw.set_defaults(func=cmd_answers)
+
+    ml = sub.add_parser("mail", help="邮件：拉取、分类、人工确认队列（只读）")
+    mlsub = ml.add_subparsers(dest="sub", required=True)
+    msw = mlsub.add_parser("sweep", help="拉取新邮件并处理")
+    msw.add_argument("--since-days", type=int, default=14)
+    msw.add_argument("--limit", type=int, default=60, help="本次最多分类几封（控制成本）")
+    msw.add_argument("--no-fetch", action="store_true", help="不拉新邮件，只处理库里还没处理的")
+    msw.set_defaults(func=cmd_mail_sweep)
+    mlsub.add_parser("queue", help="人工确认队列").set_defaults(func=cmd_mail_queue)
+    msh = mlsub.add_parser("show", help="看一封邮件的全文和链接")
+    msh.add_argument("email_id", type=int)
+    msh.set_defaults(func=cmd_mail_show)
+    mac = mlsub.add_parser("accept", help="确认队列里的一封（面试邀请等只有你能确认）")
+    mac.add_argument("email_id", type=int)
+    mac.add_argument("--application", type=int, help="没匹配上时手动指定投递 id")
+    mac.set_defaults(func=cmd_mail_accept)
+    mdi = mlsub.add_parser("dismiss", help="驳回队列里的一封")
+    mdi.add_argument("email_id", type=int)
+    mdi.add_argument("--note")
+    mdi.set_defaults(func=cmd_mail_dismiss)
+
+    pp = sub.add_parser("prep", help="为某条投递生成面试准备材料")
+    pp.add_argument("application_id", type=int)
+    pp.set_defaults(func=cmd_prep)
 
     ta = sub.add_parser("tailor", help="为某个岗位定制简历（选材 + 渲染 + 幻觉校验）")
     ta.add_argument("job_id", type=int)

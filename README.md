@@ -6,8 +6,8 @@
 > 所以 `config/*.yaml`、`.env`、`data/` 全部在 `.gitignore` 里，仓库中只保留 `*.example.yaml`。
 > 代价是简历没有 git 版本历史——要的话自己另外备份（Phase 7 会加每日备份）。
 
-当前进度：**Phase 0 · 1 · 2 · 3 · 4 + Agent loop 完成**。剩 Phase 5（邮件）和 Phase 6（面试模拟）。
-JD 分析、简历定制、邮件、面试模拟尚未实现。
+当前进度：**Phase 0 · 1 · 2 · 3 · 4 · 5 + Agent loop 完成**。剩 Phase 6（面试模拟）。
+面试模拟尚未实现。
 
 ---
 
@@ -71,7 +71,7 @@ cp .env.example .env
 ./.venv/Scripts/agent.exe companies sync
 ```
 
-**`email_domains` 一定要填。** Phase 5 把邮件匹配回投递记录的第一步就是查发件域名，空着的话那家公司的邮件会全部落到人工队列。
+**`email_domains` 填公司自己的域名**（`ramp.com`），**不要**填 `greenhouse-mail.io` / `ashbyhq.com` 这类 ATS 共享发信域名——那是所有公司共用的，填进来等于「每一封 Greenhouse 邮件都是这家公司的」。代码会忽略它们，ATS 发来的信靠发件人显示名和主题认公司。
 
 ### 4. 填内推线索
 
@@ -107,6 +107,9 @@ cp .env.example .env
 | `agent confirm <id>` | 记下确认邮件到了 |
 | `agent export` | 导出 TSV，可直接粘进 Google Sheet |
 | `agent answers <job_id>` | 申请表自定义问题起草 |
+| `agent mail sweep` | 拉取并处理新邮件（只读） |
+| `agent mail queue` | 人工确认队列；`accept` / `dismiss` / `show <id>` |
+| `agent prep <application_id>` | 面试准备材料 |
 
 `agent fetch` 的开关：`--explain` 显示初筛丢弃原因和样本（调过滤条件全靠它）、
 `--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Telegram。
@@ -268,6 +271,32 @@ JD 里藏的指令说服了它也无处可施。
 
 分档是确定性正则——判断「这是不是 EEO 问题」不该交给一个可能判错的组件。
 
+### 邮件：只读、分级、人工确认
+
+先在 `.env` 填 `IMAP_USER` 和 `IMAP_APP_PASSWORD`
+（Gmail：开两步验证 → Google 账号 → 安全性 → 应用专用密码）。
+
+```bash
+./.venv/Scripts/agent.exe mail sweep
+./.venv/Scripts/agent.exe mail queue
+```
+
+**只读是三层保证**：`EXAMINE` 打开邮箱；只用 `BODY.PEEK[]` 取信（普通 `BODY[]` 会把邮件标成已读）；
+代码守卫用白名单，`uid()` 只放行 SEARCH / FETCH。
+
+**按误判代价分级**：确认邮件和拒信自动写入（events 可追加纠错）；面试邀请、OA、offer **永远进人工队列**。
+判成拒信但正文里有排期语言（availability / calendly / next round）的也进队列——
+把面试邀请当拒信是邮件模块里唯一不可挽回的错误。
+
+```bash
+./.venv/Scripts/agent.exe mail accept 12
+./.venv/Scripts/agent.exe prep 3
+```
+
+`accept` 刻意不是 agent 的工具。邮件正文——连主题行——都不进 agent 的上下文。
+
+面试邀请想即时推到 Telegram：把 `config/schedules.yaml` 里 `email-sweep` 的 `allow_notify` 改成 true。不改的话推送停在「待批准」，下次看 `agent runs` 时还在。
+
 ### 定时任务：行为住在文件里
 
 `config/schedules.yaml` 定义具名任务——提示词 + 工具集 + 预算：
@@ -339,6 +368,8 @@ src/jha/    schema.sql, db.py, status.py, profile.py, cli.py
   tailor.py   Phase 3 选材（只输出 bullet id）
   tracking.py Phase 4 追踪表、确认告警、下一步、导出
   questions.py Phase 4 申请表问题三档处理
+  mail/       Phase 5 只读 IMAP、预过滤、分类、匹配、分级策略、确认队列
+  prep.py     Phase 5 面试准备材料
   render.py   HTML 模板 → Playwright PDF + 一页约束循环
   verify.py   确定性幻觉校验器
   sources/  三个 ATS 适配器 + RawJob 归一化

@@ -185,6 +185,18 @@ CREATE TABLE IF NOT EXISTS emails (
     confidence            REAL,
     matched_application_id INTEGER REFERENCES applications(id) ON DELETE SET NULL,
     reviewed              INTEGER NOT NULL DEFAULT 0,
+    message_id            TEXT,
+    from_domain           TEXT,
+    role_hint             TEXT,
+    summary               TEXT,
+    dates_json            TEXT NOT NULL DEFAULT '[]',
+    links_json            TEXT NOT NULL DEFAULT '[]',
+    action_required       INTEGER,
+    policy                TEXT,
+    review_status         TEXT,
+    reason                TEXT,
+    event_id              INTEGER,
+    classifier_version    TEXT,
     created_at            TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_emails_class    ON emails(classification);
@@ -287,4 +299,4 @@ CREATE TABLE IF NOT EXISTS schema_version (
     version    INTEGER PRIMARY KEY,
     applied_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
-INSERT OR IGNORE INTO schema_version (version) VALUES (3);
+INSERT OR IGNORE INTO schema_version (version) VALUES (4);

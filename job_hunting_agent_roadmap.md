@@ -25,8 +25,8 @@
 | 原则 | 已经落在哪 |
 |---|---|
 | 行为落成工件 | `target_profile.yaml`（过滤行为）· `schedules.yaml`（任务提示词）· `render.SECTION_ORDER`（章节顺序）· `ANALYZER_VERSION` / `scorer_version`（打分版本） |
-| 能确定性判定的不交给模型 | 规则初筛（Phase 1）· `hard_fail_reason` 扫 JD 原文（Phase 2）· `verify.py` 幻觉校验（Phase 3）· render-measure-retry 量页数（Phase 3）· `derive_status` 推导状态（Phase 0） |
-| 沉默失败要变成响亮失败 | 幻觉的 bullet id 报错而非丢弃 · `schedules.yaml` 工具名写错报错 · 未登记的事件类型报出来 · 抓取器失败告警 · 未定价模型记进 `UNPRICED_MODELS` |
+| 能确定性判定的不交给模型 | 规则初筛（Phase 1）· `hard_fail_reason` 扫 JD 原文（Phase 2）· `verify.py` 幻觉校验（Phase 3）· render-measure-retry 量页数（Phase 3）· `derive_status` 推导状态（Phase 0）· 申请表问题分档（Phase 4）· 邮件预过滤 / 匹配 / 邀请信号兜底（Phase 5） |
+| 沉默失败要变成响亮失败 | 幻觉的 bullet id 报错而非丢弃 · `schedules.yaml` 工具名写错报错 · 未登记的事件类型报出来 · 抓取器失败告警 · 未定价模型记进 `UNPRICED_MODELS` · 缺 API key 整批报错，不伪装成「全是 other」 |
 
 第三条值得多说一句。这个项目最危险的失败模式**不是崩溃，是看起来一切正常**：
 
@@ -34,8 +34,10 @@
 - 静默少一个工具 → agent 莫名其妙做不到你要它做的事，日志却很正常
 - 静默滤掉一批岗位 → 你以为最近没什么好岗位（实际是 `India` 匹配了 `Indianapolis`）
 - 未定价模型算成 $0 → 账面好看，实际不知道钱花在哪
+- 共享发信域名当成公司域名 → 每一封 Greenhouse 邮件都被认成 Databricks
+- 用 `FETCH BODY[]` 读邮件 → 服务器悄悄把你的未读邮件全标成已读
 
-这四个都真实发生过。所以宁可吵一点。
+前四个真实发生过；后两个是 Phase 5 实现时发现、在造成损失之前堵上的。所以宁可吵一点。
 
 ---
 
@@ -588,7 +590,79 @@ refresh token 每 7 天过期的问题**，设置一次永久有效。需要你�
 
 ---
 
-### Phase 5 — 邮件处理与状态更新（2 周）
+### Phase 5 — 邮件处理与状态更新（工具组）✅ 已完成
+
+**工具**
+
+| 工具 | 权限 | 干什么 |
+|---|---|---|
+| `sweep_emails` | WRITE | 拉取 → 预过滤 → 分类（工具内部）→ 匹配 → 按误判代价更新 |
+| `list_email_queue` | READ | 人工确认队列，只给分类结果，不给邮件原文 |
+| `get_prep_pack` | READ | 面试准备材料，只汇总库里已有的事实 |
+
+**命令**：`agent mail sweep / queue / show / accept / dismiss`、`agent prep`。定时任务 `email-sweep`。
+
+**`accept_email` 刻意不是工具。** 面试邀请、OA、offer 的人工确认只在 CLI 里——
+人工确认如果 agent 能做，就不是人工确认。
+
+#### 只读靠三层，不是一层
+
+IMAP 有个不显眼的坑：**读邮件本身就可能是写操作。** `FETCH BODY[]` 和 `FETCH RFC822`
+会让服务器自动给邮件打上 `\Seen`——你收件箱里的未读会被悄悄标成已读。
+
+| 层 | 做法 |
+|---|---|
+| 协议 | `select(readonly=True)` → `EXAMINE`，服务器拒绝一切标记变更 |
+| 取信 | 只用 `BODY.PEEK[]` |
+| 代码 | `ReadOnlyImap` 守卫：写方法、`xatom`、私有 `_command` 直接抛异常；`uid()` **白名单**只放行 SEARCH / FETCH；会打 `\Seen` 的取法也拦 |
+
+用白名单不用黑名单：IMAP 扩展命令很多，黑名单漏列一个写命令就破了；白名单漏列一个读命令只是少个功能。
+测试里的假服务器模拟了「非 PEEK 会标已读」，所以「一封都没被标成已读」是**被断言的属性**。
+
+#### 最贵的错误单独设防
+
+风险表第二条「把面试邀请当拒信 → 错过面试」是邮件模块里**唯一不可挽回**的失败。
+所以分类器判成拒信之后，再用确定性正则扫一遍**邀请信号**，命中就进人工队列——
+分类器判错时系统也要兜得住。
+
+信号只选**面向未来的排期语言**（schedule / availability / calendly / next round / online assessment），
+**不选裸的 interview**：「Thank you for interviewing with us... unfortunately」是最常见的面试后拒信，
+全扔进队列的话队列很快被无视，这道防线就等于不存在。
+
+#### 实现时发现的三个坑
+
+- **共享 ATS 域名不能用来认公司。** 示例配置把 `greenhouse-mail.io` 写进了 Databricks 的 `email_domains`——
+  照字面匹配，**每一封** Greenhouse 邮件都会被认成 Databricks。共享域名只用来判断「这是招聘系统发的」，
+  认公司看发件人显示名和主题。
+- **时区。** 邮件头时间带时区，手工事件不带，混进 events 表后 `derive_status` 排序直接抛 `TypeError`。
+  解析时统一转成本地无时区时间。
+- **IMAP 日期必须是英文月份。** `strftime("%b")` 跟 locale 走，中文 Windows 上是「9月」，SEARCH 会失败。
+
+#### 提醒
+
+`sweep_emails` 返回的 `alerts` 只有公司、岗位、类型和邮件 id。`email-sweep` 带着 `send_notification`，
+但它是 `GATED`：`allow_notify` 默认 false，推送会停在「待批准」——要即时收到面试邀请，就在 `schedules.yaml` 里显式改成 true。
+「14 天没动静」的 follow-up 提示 Phase 4 的 `tracking.py` 已经有了，这里不重复做。
+
+#### 给 agent 的东西里没有邮件原文
+
+连**主题行**都不给——主题行一样是不可信输入。agent 看到的公司名和岗位名来自我们自己的库。
+
+#### prep pack 诚实地标 TODO
+
+七项里五项是库里现成的事实（JD 讲解、技能对比、gap、投出去的简历、内推人），拼起来就行。
+「可能问到的问题」要 LLM、「公司近况」要 web search——**明确标 TODO，不假装做了**。
+多做了一处：把 story_bank 和**投出去的那几条 bullet** 对上，没写 STAR 的标出来。
+
+> **还没做 / 还没验证的**
+> - **分类器的真实准确率。** 离线测试覆盖的是分类器**之外**的一切——它判错时系统能不能兜住。
+>   准确率要等真邮件进来、攒够测试集之后看混淆矩阵。
+> - **50 封邮件的分类测试集还没建。** `emails.body_text` 已经在存正文，攒够了就能建。
+> - **req ID 没有持久化。** 同一家公司投了两个同名岗位时，匹配会老实判成 ambiguous 进队列，不猜。
+
+---
+
+### Phase 5 原始设计（保留供对照）
 
 **产出**：自动读取邮件、分类、匹配投递记录、建议状态变更、推送提醒；面试邀请自动生成 prep pack。
 
@@ -619,7 +693,7 @@ refresh token 每 7 天过期的问题**，设置一次永久有效。需要你�
 - 用 Gmail 标签作为 UI？→ **不做。** 打标签需要 `gmail.modify`，同样是 restricted scope，**既没解决 7 天过期问题，又直接违反了全局原则「邮件只读」**。审核队列放 CLI 或 Telegram 里。
 
 **注意（安全，重要）**
-- **邮件正文永远不进 agent loop 的上下文。** 分类在 `classify_emails` 工具**内部**做：
+- **邮件正文永远不进 agent loop 的上下文。** 分类在 `sweep_emails` 工具**内部**做：
   逐封一次 Haiku 调用、独立上下文、**那一层没有任何工具**（§1.1）。
   邮件里藏的指令就算说服了分类模型，它也无处可施——这是主防线。
   agent 拿到的只是 `{email_id, type, confidence, matched_application_id}`。
@@ -738,7 +812,7 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
 | 名字 | 频率 | 权限 | 干什么 |
 |---|---|---|---|
 | `daily-jobs` | 每日 1–2 次 | WRITE；外发 GATED | 抓取 → `analyze_jobs` → 出 feed，有内推路径的排最前 |
-| `email-sweep` | 每小时（Phase 5 之后） | WRITE | 读邮件 → 分类 → 追加事件 → 更新 tracking |
+| `email-sweep` | 每 30–60 分钟 | WRITE；外发 GATED | `sweep_emails` → 确认邮件 / 拒信自动写入 → 面试邀请 / OA / offer 进人工队列 |
 | `weekly-review` | 每周一次 | **READ-only** | 指标、漏报误报抽查、超期投递提醒 |
 
 **三条设计规矩**：
@@ -812,7 +886,7 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
 | **Phase 3 简历定制** | ✅ 完成 | 一键生成定制简历；三道防幻觉保证；一页约束量出来的；审核门有牙齿 |
 | Phase 6 面试模拟 | ← 下一个，1 周 | 零依赖；而且能反过来逼出你缺失的 bullet 数字 |
 | **Phase 4 Tracking** | ✅ 完成 | 投递落库、追踪表、确认邮件告警、问题起草、每日上限 |
-| Phase 5 邮件 | ← 下一个，2 周 | `email-sweep` 自动分类、更新 tracking、面试提醒 |
+| **Phase 5 邮件** | ✅ 完成 | 只读邮箱、分类、按误判代价自动更新、人工确认队列、prep pack |
 | Phase 7 运营 | 持续 | `weekly-review` 复盘、调参 |
 | Phase 4.5 表单预填 | 按需 | **只在确认它真是瓶颈之后才做** |
 

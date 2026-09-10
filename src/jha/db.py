@@ -26,7 +26,7 @@ def connect(path: str | Path | None = None) -> sqlite3.Connection:
     return conn
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 #: 后加的列。schema.sql 里已经有它们（新库直接建好），这份清单是给**已存在的库**
 #: 升级用的——`CREATE TABLE IF NOT EXISTS` 不会给旧表补列，跑起来只会在
@@ -34,6 +34,27 @@ SCHEMA_VERSION = 3
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "miss_count", "INTEGER NOT NULL DEFAULT 0"),
     ("jobs", "screen_tier", "TEXT"),
+    ("emails", "message_id", "TEXT"),
+    ("emails", "from_domain", "TEXT"),
+    ("emails", "role_hint", "TEXT"),
+    ("emails", "summary", "TEXT"),
+    ("emails", "dates_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("emails", "links_json", "TEXT NOT NULL DEFAULT '[]'"),
+    ("emails", "action_required", "INTEGER"),
+    ("emails", "policy", "TEXT"),
+    ("emails", "review_status", "TEXT"),
+    ("emails", "reason", "TEXT"),
+    ("emails", "event_id", "INTEGER"),
+    ("emails", "classifier_version", "TEXT"),
+)
+
+
+#: 建在「后加的列」上的索引。不能写进 schema.sql——对已存在的库，
+#: schema.sql 先执行，那时这些列还没补上，建索引会直接报 no such column。
+_ADDED_INDEXES: tuple[str, ...] = (
+    "CREATE INDEX IF NOT EXISTS idx_emails_policy ON emails(policy)",
+    "CREATE INDEX IF NOT EXISTS idx_emails_review ON emails(review_status)",
+    "CREATE INDEX IF NOT EXISTS idx_emails_msgid  ON emails(message_id)",
 )
 
 
@@ -56,6 +77,9 @@ def init_db(conn: sqlite3.Connection) -> list[str]:
         if column not in _columns(conn, table):
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
             added.append(f"{table}.{column}")
+
+    for ddl in _ADDED_INDEXES:
+        conn.execute(ddl)
 
     conn.execute("INSERT OR IGNORE INTO schema_version (version) VALUES (?)", (SCHEMA_VERSION,))
     conn.commit()

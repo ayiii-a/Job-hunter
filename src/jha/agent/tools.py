@@ -12,6 +12,8 @@
     delete_* / update_event —— 没有。events 表连数据库层面都禁止改删
     approve_resume      —— 没有。审核门如果 agent 能自己过，那就不是门。
                           它只在 CLI 里：agent resume approve <id>
+    accept_email        —— 没有。面试邀请 / OA / offer 的人工确认只在 CLI 里：
+                          agent mail accept <id>。人工确认如果 agent 能做，就不是人工确认
 
 模型再怎么被 JD 或邮件正文里的注入内容诱导，也调不出不存在的函数。
 **加工具之前先问一句：这个能力被滥用的最坏后果是什么。**
@@ -34,7 +36,7 @@ from datetime import datetime
 from enum import Enum
 from typing import Any, Callable
 
-from .. import analyze, db, ingest, notify, profile, questions, tailor, tracking
+from .. import analyze, db, ingest, notify, prep, profile, questions, tailor, tracking
 
 
 class Permission(str, Enum):
@@ -628,6 +630,54 @@ def draft_answers(
     return questions.summarize(
         questions.answer_all(list(qs), company=company, role=role)
     )
+
+
+@tool(
+    "sweep_emails",
+    "拉取新邮件并处理：确定性预过滤 → 分类（在工具内部逐封进行，邮件正文不会进入你的上下文）"
+    "→ 匹配到投递记录 → 按误判代价分级更新。只会自动写入确认邮件和拒信（可追加事件纠正）；"
+    "面试邀请、OA、offer 一律进人工确认队列——你**没有**确认它们的能力，也不需要去做。",
+    Permission.WRITE,
+    _obj({"since_days": INT}),
+)
+def sweep_emails(conn: sqlite3.Connection, since_days: int = 14) -> dict:
+    from ..mail import pipeline as mail_pipeline
+    from ..mail.imap import MailReader
+
+    fetched, new = mail_pipeline.ingest(conn, MailReader(), since_days=max(1, int(since_days)))
+    rep = mail_pipeline.process_pending(conn)
+    return {"fetched": fetched, "new": new, **rep.compact()}
+
+
+@tool(
+    "list_email_queue",
+    "人工确认队列：需要用户亲自确认的邮件（面试邀请、OA、offer、匹配不上的、置信度低的）。"
+    "只给分类结果和原因，不给邮件正文。把这些列给用户，让他自己跑 agent mail accept。",
+    Permission.READ,
+    _obj({}),
+)
+def list_email_queue(conn: sqlite3.Connection) -> dict:
+    from ..mail import pipeline as mail_pipeline
+
+    pending = mail_pipeline.queue_for_agent(conn)
+    return {"count": len(pending), "pending": pending}
+
+
+@tool(
+    "get_prep_pack",
+    "为某条投递生成面试准备材料：JD 讲解、技能对比、gap、投出去的那版简历、"
+    "对得上的 STAR 故事、内推人、时间线。只汇总库里已有的事实，不编造。返回文件路径。",
+    Permission.READ,
+    _obj({"application_id": INT}, ["application_id"]),
+)
+def get_prep_pack(conn: sqlite3.Connection, application_id: int) -> dict:
+    path = prep.write(conn, application_id)
+    text = path.read_text(encoding="utf-8")
+    return {
+        "application_id": application_id, "path": str(path),
+        "sections": [l[3:] for l in text.splitlines() if l.startswith("## ")],
+        "todo_count": text.count("TODO") + text.count("⚠"),
+    }
 
 
 # ---------------------------------------------------------------------------

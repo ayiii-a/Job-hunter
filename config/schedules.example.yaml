@@ -71,12 +71,26 @@ schedules:
     notes: "只读。发现问题交给人处理，不代劳"
 
   # ---------------------------------------------------------------------
-  # Phase 5 落地之后才有用——现在库里还没有邮件工具，跑了会说做不了。
+  # 每 30–60 分钟一次。分类在工具内部做，邮件正文不进 agent 上下文。
+  # agent 没有确认面试邀请的能力——那些进人工队列，由你跑 agent mail accept。
   # ---------------------------------------------------------------------
-  # email-sweep:
-  #   task: |
-  #     拉取新邮件、分类、匹配到投递记录、追加事件。
-  #     面试邀请 / OA / offer 不要自动改状态，列出来让我确认。
-  #   tools: [list_applications, append_event, list_companies]
-  #   max_turns: 6
-  #   max_llm_calls: 15
+  email-sweep:
+    task: |
+      拉取新邮件并处理。然后简要告诉我：
+
+      - 自动写入了哪些（确认邮件、拒信）
+      - 人工确认队列里有什么——offer、面试邀请、OA 放最前面，说清楚是哪家公司哪个岗位
+      - 有没有投出去 24 小时还没收到确认邮件的
+
+      你没有确认面试邀请的能力，也不需要去做——列出来，让我自己跑 agent mail accept。
+      如果有 offer、面试邀请或 OA，用 send_notification 推一条给我：只写公司、岗位、类型和邮件 id。
+    tools:
+      - sweep_emails
+      - list_email_queue
+      - get_tracking
+      - check_confirmations
+      - send_notification
+    max_turns: 6
+    max_llm_calls: 12
+    allow_notify: false        # 面试邀请想即时收到就改成 true；不改的话推送停在「待批准」
+    notes: "Phase 5。只读邮箱，只自动写可纠正的事件"
