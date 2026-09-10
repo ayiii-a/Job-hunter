@@ -372,3 +372,41 @@ def test_rewrite_allows_pure_wording_change():
         MASTER,
     )
     assert rep.ok, rep.problems
+
+
+# ---------------------------------------------------------------------------
+# 章节顺序与页眉
+# ---------------------------------------------------------------------------
+
+def test_section_order_is_education_experience_projects_skills():
+    import re
+
+    markup = render.build_html(MASTER, ["b1", "b3"], skills_line=["Python"])
+    assert re.findall(r"<h2>(\w+)", markup) == [
+        "Education", "Experience", "Projects", "Skills"
+    ]
+
+
+def test_section_order_is_a_single_constant():
+    """顺序抽成常量，因为它对应届生和有工作经验的人应该不一样。
+
+    在读/应届把 Education 放最前；工作几年之后该让 Experience 打头。
+    改一行就能整体调整。
+    """
+    assert render.SECTION_ORDER == ("education", "experience", "projects", "skills")
+
+
+def test_name_and_contact_are_centered():
+    markup = render.build_html(MASTER, ["b1"])
+    css = markup[: markup.index("</style>")]
+    assert "h1 {" in css and "text-align: center" in css
+    assert ".contact {" in css
+    # 两处各自居中
+    assert css.count("text-align: center") >= 2
+
+
+def test_skills_section_omitted_when_empty():
+    import re
+
+    markup = render.build_html(MASTER, ["b1"])
+    assert "Skills" not in re.findall(r"<h2>(\w+)", markup)

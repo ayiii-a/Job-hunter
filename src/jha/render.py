@@ -31,6 +31,11 @@ _PDF_PAGE = re.compile(rb"/Type\s*/Page[^s]")
 
 MAX_SHRINK_ROUNDS = 12
 
+#: 章节顺序。抽出来做常量，是因为它对应届生和有工作经验的人应该是**不一样的**：
+#: 在读/应届把 Education 放最前（学位是当前最主要的资历），工作几年之后
+#: 就该让 Experience 打头。改这一行就能整体调整，不用动渲染逻辑。
+SECTION_ORDER: tuple[str, ...] = ("education", "experience", "projects", "skills")
+
 
 class RenderUnavailable(RuntimeError):
     """没装 Playwright 或浏览器。HTML 仍然可用，只是量不了页数。"""
@@ -56,8 +61,8 @@ CSS = """
 * { box-sizing: border-box; }
 body { font-family: Georgia, 'Times New Roman', serif; font-size: 10.2pt;
        line-height: 1.34; color: #111; margin: 0; }
-h1 { font-size: 17pt; margin: 0 0 2pt; letter-spacing: .3px; }
-.contact { font-size: 9pt; color: #333; margin-bottom: 9pt; }
+h1 { font-size: 17pt; margin: 0 0 3pt; letter-spacing: .3px; text-align: center; }
+.contact { font-size: 9pt; color: #333; margin-bottom: 10pt; text-align: center; }
 h2 { font-size: 10.5pt; text-transform: uppercase; letter-spacing: .8px;
      border-bottom: 1px solid #999; padding-bottom: 2pt;
      margin: 11pt 0 5pt; }
@@ -97,51 +102,68 @@ def build_html(
         ) if x
     )
 
-    parts = [
+    header = [
         f"<style>{CSS}</style>",
         f"<h1>{_esc(basics.get('name'))}</h1>",
         f'<div class="contact">{contact}</div>',
     ]
 
-    if skills_line:
-        parts.append('<h2>Skills</h2><div class="skills"><p>'
-                     + _esc(" · ".join(skills_line)) + "</p></div>")
+    def entry_block(head: str, meta: str, items: str = "") -> str:
+        body = f"<ul>{items}</ul>" if items else ""
+        return (
+            f'<div class="entry"><div class="entry-head">'
+            f'<span class="entry-title">{head}</span>'
+            f'<span class="entry-meta">{meta}</span></div>{body}</div>'
+        )
 
-    for kind, heading in (("experiences", "Experience"), ("projects", "Projects")):
+    def bullet_section(kind: str, heading: str) -> list[str]:
         entries = [
             e for e in (master.get(kind) or [])
             if any(b.get("id") in chosen for b in (e.get("bullets") or []))
         ]
         if not entries:
-            continue
-        parts.append(f"<h2>{heading}</h2>")
+            return []
+        out = [f"<h2>{heading}</h2>"]
         for entry in entries:
             title = entry.get("title") or entry.get("name") or ""
             org = entry.get("company") or ""
-            head = " — ".join(_esc(x) for x in (org, title) if x)
-            meta = " · ".join(_esc(x) for x in (entry.get("location"), entry.get("period")) if x)
             bullets = [b for b in (entry.get("bullets") or []) if b.get("id") in chosen]
             bullets.sort(key=lambda b: chosen.index(b["id"]))
-            items = "".join(f"<li>{_esc(b.get('text'))}</li>" for b in bullets)
-            parts.append(
-                f'<div class="entry"><div class="entry-head">'
-                f'<span class="entry-title">{head}</span>'
-                f'<span class="entry-meta">{meta}</span></div>'
-                f"<ul>{items}</ul></div>"
-            )
+            out.append(entry_block(
+                " — ".join(_esc(x) for x in (org, title) if x),
+                " · ".join(_esc(x) for x in (entry.get("location"), entry.get("period")) if x),
+                "".join(f"<li>{_esc(b.get('text'))}</li>" for b in bullets),
+            ))
+        return out
 
-    edu = master.get("education") or []
-    if edu:
-        parts.append("<h2>Education</h2>")
+    def education_section() -> list[str]:
+        edu = master.get("education") or []
+        if not edu:
+            return []
+        out = ["<h2>Education</h2>"]
         for e in edu:
-            head = " — ".join(_esc(x) for x in (e.get("school"), e.get("degree")) if x)
-            meta = " · ".join(_esc(x) for x in (e.get("location"), e.get("period")) if x)
-            parts.append(
-                f'<div class="entry"><div class="entry-head">'
-                f'<span class="entry-title">{head}</span>'
-                f'<span class="entry-meta">{meta}</span></div></div>'
-            )
+            out.append(entry_block(
+                " — ".join(_esc(x) for x in (e.get("school"), e.get("degree")) if x),
+                " · ".join(_esc(x) for x in (e.get("location"), e.get("period")) if x),
+            ))
+        return out
 
+    def skills_section() -> list[str]:
+        if not skills_line:
+            return []
+        return ['<h2>Skills</h2><div class="skills"><p>'
+                + _esc(" · ".join(skills_line)) + "</p></div>"]
+
+    builders = {
+        "education": education_section,
+        "experience": lambda: bullet_section("experiences", "Experience"),
+        "projects": lambda: bullet_section("projects", "Projects"),
+        "skills": skills_section,
+    }
+
+    parts = list(header)
+    for name in SECTION_ORDER:
+        parts += builders[name]()
     return "\n".join(parts)
 
 
