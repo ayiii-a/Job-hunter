@@ -24,9 +24,9 @@
 
 | 原则 | 已经落在哪 |
 |---|---|
-| 行为落成工件 | `target_profile.yaml`（过滤行为）· `schedules.yaml`（任务提示词）· `render.SECTION_ORDER`（章节顺序）· `ANALYZER_VERSION` / `scorer_version`（打分版本） |
-| 能确定性判定的不交给模型 | 规则初筛（Phase 1）· `hard_fail_reason` 扫 JD 原文（Phase 2）· `verify.py` 幻觉校验（Phase 3）· render-measure-retry 量页数（Phase 3）· `derive_status` 推导状态（Phase 0）· 申请表问题分档（Phase 4）· 邮件预过滤 / 匹配 / 邀请信号兜底（Phase 5） |
-| 沉默失败要变成响亮失败 | 幻觉的 bullet id 报错而非丢弃 · `schedules.yaml` 工具名写错报错 · 未登记的事件类型报出来 · 抓取器失败告警 · 未定价模型记进 `UNPRICED_MODELS` · 缺 API key 整批报错，不伪装成「全是 other」 |
+| 行为落成工件 | `target_profile.yaml`（过滤行为）· `schedules.yaml`（任务提示词）· `render.SECTION_ORDER`（章节顺序）· `ANALYZER_VERSION` / `scorer_version`（打分版本）· OpenClaw 配置由 `schedules.yaml` 生成（§3.7） |
+| 能确定性判定的不交给模型 | 规则初筛（Phase 1）· `hard_fail_reason` 扫 JD 原文（Phase 2）· `verify.py` 幻觉校验（Phase 3）· render-measure-retry 量页数（Phase 3）· `derive_status` 推导状态（Phase 0）· 申请表问题分档（Phase 4）· 邮件预过滤 / 匹配 / 邀请信号兜底（Phase 5）· 面试邀请即时提醒走确定性推送（§3.7） |
+| 沉默失败要变成响亮失败 | 幻觉的 bullet id 报错而非丢弃 · `schedules.yaml` 工具名写错报错 · 未登记的事件类型报出来 · 抓取器失败告警 · 未定价模型记进 `UNPRICED_MODELS` · 缺 API key 整批报错，不伪装成「全是 other」· 邮件检测过期告警 · 外壳配置被改松时 `agent openclaw verify` 报错（§3.7） |
 
 第三条值得多说一句。这个项目最危险的失败模式**不是崩溃，是看起来一切正常**：
 
@@ -795,7 +795,7 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
 ## 3.6 定时运行 ✅ 已建成
 
 定义在 `config/schedules.yaml`，每个 = 任务提示词 + 工具集 + 预算，
-由 Windows 任务计划 / cron 调用 `agent run --schedule <name>`。
+由 Windows 任务计划 / cron 调用 `agent run --schedule <name>`，或者交给 OpenClaw 外壳（§3.7）。
 `agent schedules` 看有哪些。
 
 **为什么要落成文件**（§0「行为落成工件」）：任务提示词是会改变 agent 行为的东西。
@@ -812,7 +812,9 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
 | 名字 | 频率 | 权限 | 干什么 |
 |---|---|---|---|
 | `daily-jobs` | 每日 1–2 次 | WRITE；外发 GATED | 抓取 → `analyze_jobs` → 出 feed，有内推路径的排最前 |
-| `email-sweep` | 每 30–60 分钟 | WRITE；外发 GATED | `sweep_emails` → 确认邮件 / 拒信自动写入 → 面试邀请 / OA / offer 进人工队列 |
+| `email-sweep` | 每天一次（总结） | WRITE | `sweep_emails` → 确认邮件 / 拒信自动写入 → 面试邀请 / OA / offer 进人工队列 |
+| `mail sweep --push-alerts` | 每 1–2 小时 | 确定性，不经过模型 | 面试邀请 / OA / offer 即时推送；每次检测在 `fetch_runs` 留痕，超过 6 小时没有成功就报过期 |
+| `phone-query` | 不定时（聊天入口） | **READ-only** | 手机上查队列和进度；确认回电脑上做 |
 | `weekly-review` | 每周一次 | **READ-only** | 指标、漏报误报抽查、超期投递提醒 |
 
 **三条设计规矩**：
@@ -821,11 +823,72 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
    不是让 agent 顺手把它改掉——它一改，你就失去了那次校准的机会。
 2. **每个 run 有独立预算**，不共享。某天 `daily-jobs` 因为新岗位特别多而烧超了，
    不该影响 `email-sweep`。
-3. **外发永远 GATED，哪怕是定时任务。** 推送内容可能受 JD / 邮件正文影响
+3. **经过模型的外发永远 GATED，哪怕是定时任务。** 推送内容可能受 JD / 邮件正文影响
    （注入面），而且发出去不可撤回。未批准的推送会记进 `agent_runs.pending_approvals_json`，
    你下次看的时候还在。
+   唯一的例外是**确定性推送**（`mail sweep --push-alerts`）：不经过模型、文本只含库里的字段、
+   收件人固定——邮件正文改写不了它的内容。
 
 **每次 run 结束写 `agent_runs` + `agent_steps`**。没有这个，无人值守就是无人知晓。
+
+---
+
+## 3.7 外壳：OpenClaw（本机 WSL2）— 代码侧 ✅，spike 待执行
+
+**外壳补的是常驻运行和双向聊天入口，不是 agent 能力，也不是新的安全边界。**
+现在的 agent 层是「你去找它」：开终端跑命令、看输出。OpenClaw 让它「来找你」：按时跑、结果推到手机、手机上问一句回一句。
+
+| | 现在（`src/jha/agent/`） | OpenClaw |
+|---|---|---|
+| 进程 | 一次性，跑完退出 | 常驻 Gateway |
+| 安全模型 | 能力不存在：危险工具根本没写 | 能力存在，靠配置收回：`tools.allow`、沙箱 |
+| 子任务 | 工具内部单次调用，不带工具 | `sessions_spawn` 子 agent，继承父 agent 的工具 |
+| 每轮固定开销 | 约 1–1.5K tokens | 社区实测一例约 25K；light-context 能降下来 |
+| 复盘 | `agent_runs` / `agent_steps` | 会话 transcript |
+
+**架构**
+
+```
+OpenClaw Gateway（WSL2，systemd 用户服务）
+ ├─ cron jha-mail-detect   每 2h         command 作业：agent mail sweep --push-alerts（不经过模型）
+ ├─ cron jha-email-sweep   每天 21:00    isolated + light-context，claude-haiku-4-5
+ ├─ cron jha-daily-jobs    每天 9:00     isolated + light-context，claude-sonnet-5
+ ├─ cron jha-weekly-review 每周日 10:00  isolated + light-context，claude-sonnet-5
+ ├─ jha-phone-query：绑定 Telegram 私聊，只读
+ └─ 每个 agent 的 mcpServers → python -m jha.mcp_server --schedule <任务名>
+
+我们的 Python（Windows 原生，不变）：工具注册表、第二层、agent_runs / agent_steps、agent run
+```
+
+调度设置写在 `schedules.yaml` 每个任务的 `openclaw` 块里，`agent openclaw config` 从它生成 OpenClaw 配置——§0「行为落成工件」。
+
+**三条设计决定**
+
+1. **边界在我们这边再守一次。** OpenClaw 的白名单是一行配置，改松了、升级带进新的内置工具，都不会报错。
+   所以 `mcp_server.py` 按任务收窄：只暴露该任务的工具、剔除 GATED，名单外的调用直接拒绝并记 error step。
+   `send_notification` 永远不交给外壳——OpenClaw 的批准可以选 allow-always，会跨 run 延续，违反 GATED 的语义；
+   推送改由 cron 的 announce 发到写死的收件人。
+2. **读 JD、改简历不用子 agent。** 它们本来就是工具内部单次、隔离、不带工具的调用——
+   子 agent 的想法已经实现了，只是实现成了函数而不是会话。换成 `sessions_spawn` 会丢掉注入隔离（子 agent 继承工具），
+   每条 JD 多付一整份系统提示，而且防幻觉校验本来就在 Python 里。
+3. **时间敏感的不经过模型。** 面试邀请提醒是 `mail sweep --push-alerts` 这个 command 作业，每 1–2 小时一次；
+   agent 只做每天一次的总结。agent 降频不会拖慢提醒。
+
+**verify 有牙齿。** `agent openclaw verify` 检查：gateway 只绑 loopback、每个 jha agent 有白名单且只含该任务的工具、
+沙箱 all、heartbeat 关闭、MCP 服务器服务的是对应任务、Telegram 私聊只允许你本人、定时任务的 agent 不能从聊天触发、
+gateway 上没有别的 agent。找不到该有的键就算问题。每一种改松方式都有一条会失败的测试（`tests/test_openclaw_config.py`）。
+
+**又一个沉默失败。** 邮件检测停掉时（外壳挂了、电脑睡着、应用专用密码被撤），你看到的只是「最近没有面试邀请」。
+所以每次检测都在 `fetch_runs` 留一行，超过 6 小时没有**成功**的检测就报过期。
+实现时还踩到一个坑：`fetch_runs` 的时间是 SQLite 的 UTC，拿本地时间去比，在美东会晚 4–5 小时才报。
+
+**还没做 / 还不知道的**
+
+- **Spike 还没做**：MCP 能不能从 WSL 拉起 Windows 的 python、白名单是否真的只把这几个工具发给模型、单次 run 的真实 token 数、WSL 保活、睡眠唤醒后 cron 补不补跑。前三项任何一项不成立就退回 Windows 任务计划
+- **配置键名按 2026-09 的文档写**，装好后用 `openclaw config schema` 核对
+- **记账缺口**：OpenClaw 自己的模型费用不经过 `Budget`，这些 run 在 `agent runs` 里 `model` 是 openclaw、成本为 0
+- **配置文件查不到的**：没装 ClawHub 上的 skill、版本已固定——只能你自己确认
+- **平台本身的风险仍在**：CVE-2026-25253、ClawJacked、ClawHub 恶意 skill。缓解：不装第三方 skill、固定版本、gateway 只绑 loopback、Telegram 只认你、沙箱 all
 
 ---
 
@@ -852,6 +915,12 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
 | 17 | 新工具的默认权限 | **`GATED`**，批准约 20 次无事故后降 `WRITE` | 每个工具分别毕业 |
 | 18 | 无人值守 run 能写库吗 | **能**（本地库）；外发仍需单次批准 | 出过一次误写就收回 |
 | 19 | 月度预算 | $10–40：编排 Sonnet-5，批量活 Haiku-4.5 | 换档就更新 `PRICING` |
+| 20 | 常驻运行与手机入口 | **OpenClaw 外壳（本机 WSL2）**，不是新的安全边界 | spike 前三项任何一项不成立就退回任务计划 |
+| 21 | 读 JD / 改简历用不用子 agent | **不用**，保持工具内部单次、不带工具的调用 | 不建议改——子 agent 会继承工具，丢掉注入隔离 |
+| 22 | 外壳能拿到哪些工具 | **MCP 服务器按任务收窄、剔除 GATED**，名单外的调用拒绝 | 不建议改 |
+| 23 | 面试邀请即时提醒 | **确定性推送**，不经过模型；agent 只做每日总结 | 不建议改 |
+| 24 | 手机上能不能确认面试邀请 | **不能**，只读查询；确认回电脑上做 | 真需要时再做绕过模型的确定性命令 |
+| 25 | 外壳部署在哪 | **本机 WSL2**，不上 VPS | VPS 等于放弃「数据本地」 |
 
 ---
 
@@ -884,15 +953,12 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
 | **Phase 2 JD 分析** | ✅ 完成 | `analyze_jobs` / `get_analysis` / `rank_jobs`；判定档位 + gap；硬性排除确定性覆盖 |
 | **轨迹持久化** | ✅ 完成 | `agent_runs` / `agent_steps`；`agent runs --show` 复盘；按任务拆账；权限毕业计数 |
 | **Phase 3 简历定制** | ✅ 完成 | 一键生成定制简历；三道防幻觉保证；一页约束量出来的；审核门有牙齿 |
-| Phase 6 面试模拟 | ← 下一个，1 周 | 零依赖；而且能反过来逼出你缺失的 bullet 数字 |
+| Phase 6 面试模拟 | 外壳 spike 之后，1 周 | 零依赖；而且能反过来逼出你缺失的 bullet 数字 |
 | **Phase 4 Tracking** | ✅ 完成 | 投递落库、追踪表、确认邮件告警、问题起草、每日上限 |
 | **Phase 5 邮件** | ✅ 完成 | 只读邮箱、分类、按误判代价自动更新、人工确认队列、prep pack |
+| **OpenClaw 外壳** | 代码侧 ✅；spike ← 下一个（半天） | 按任务收窄的 MCP 服务器、配置生成与检查、面试邀请即时推送、邮件检测过期告警、手机只读查询 |
 | Phase 7 运营 | 持续 | `weekly-review` 复盘、调参 |
 | Phase 4.5 表单预填 | 按需 | **只在确认它真是瓶颈之后才做** |
-
-> **还没做的**：`config/schedules.yaml` 和 `agent run --schedule`（§3.6）。
-> 定时任务的定义还在文档里，没有落成配置——`schedule_name` 参数已经打通，
-> 目前需要在调用时手工传。
 
 > **原计划写的是 5–6 周，那个数字不诚实。** 按业余时间算，光母简历就要 1–2 周，简历渲染和邮件接入各有自己的坑，**9–12 周是更真实的估计**。
 >

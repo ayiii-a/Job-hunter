@@ -6,7 +6,7 @@
 > 所以 `config/*.yaml`、`.env`、`data/` 全部在 `.gitignore` 里，仓库中只保留 `*.example.yaml`。
 > 代价是简历没有 git 版本历史——要的话自己另外备份（Phase 7 会加每日备份）。
 
-当前进度：**Phase 0 · 1 · 2 · 3 · 4 · 5 + Agent loop 完成**。剩 Phase 6（面试模拟）。
+当前进度：**Phase 0 · 1 · 2 · 3 · 4 · 5 + Agent loop 完成**；OpenClaw 外壳的代码侧已完成，等你在 WSL2 里做 spike。剩 Phase 6（面试模拟）。
 面试模拟尚未实现。
 
 ---
@@ -110,6 +110,9 @@ cp .env.example .env
 | `agent mail sweep` | 拉取并处理新邮件（只读） |
 | `agent mail queue` | 人工确认队列；`accept` / `dismiss` / `show <id>` |
 | `agent prep <application_id>` | 面试准备材料 |
+| `agent mail sweep --push-alerts` | 给定时任务用：有面试邀请 / OA / offer 就推到 Telegram（确定性，不经过模型） |
+| `agent openclaw config` | 从 `schedules.yaml` 生成 OpenClaw 配置片段、cron 命令和 AGENTS.md |
+| `agent openclaw verify <path>` | 检查 OpenClaw 配置有没有被改松 |
 
 `agent fetch` 的开关：`--explain` 显示初筛丢弃原因和样本（调过滤条件全靠它）、
 `--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Telegram。
@@ -295,7 +298,7 @@ JD 里藏的指令说服了它也无处可施。
 
 `accept` 刻意不是 agent 的工具。邮件正文——连主题行——都不进 agent 的上下文。
 
-面试邀请想即时推到 Telegram：把 `config/schedules.yaml` 里 `email-sweep` 的 `allow_notify` 改成 true。不改的话推送停在「待批准」，下次看 `agent runs` 时还在。
+**面试邀请的即时提醒不经过模型。** `agent mail sweep --push-alerts` 由定时任务每 1–2 小时跑一次（OpenClaw 的 command 作业，或者 Windows 任务计划），推送只含公司、岗位、类型和邮件 id；推送失败时退出码非零。每次检测都在 `fetch_runs` 留一行，超过 6 小时没有成功的检测，`get_fetch_health` 和每日总结会报「已过期」——检测静默停掉时，你看到的只会是「最近没有面试邀请」。
 
 ### 定时任务：行为住在文件里
 
@@ -314,6 +317,39 @@ JD 里藏的指令说服了它也无处可施。
 `tailor_resume` / `append_event` 在结构上够不着——哪怕它被 JD 里的注入内容说服了。
 
 工具名写错会直接报错，不会静默少给一个。
+
+### OpenClaw 外壳：常驻运行 + 手机入口（可选）
+
+外壳补上的是**常驻运行和双向聊天入口**，不是新的安全边界。边界仍然是工具注册表，而且在我们自己的代码里再守一次：
+
+- **按任务收窄的 MCP 服务器**（`python -m jha.mcp_server --schedule <名字>`）：只暴露该任务的工具，剔除 GATED；名单外的调用直接拒绝并留痕。就算 OpenClaw 的配置被改松，也拿不到更多我们的工具。
+- **读 JD、改简历不交给 OpenClaw 子 agent**：它们本来就是工具内部单次、不带工具的调用。
+- **时间敏感的不经过模型**：面试邀请提醒是 `mail sweep --push-alerts` 这个 command 作业；agent 只做每天一次的总结。
+- **手机上只读**：`phone-query` 能查队列、进度和分析；确认面试邀请仍回电脑上跑 `agent mail accept`。
+
+生成配置（写到 `data/openclaw`，不碰 `~/.openclaw`）：
+
+```bash
+./.venv/Scripts/agent.exe openclaw config --out data/openclaw
+```
+
+合进 OpenClaw 的配置之后，检查一遍：
+
+```bash
+./.venv/Scripts/agent.exe openclaw verify data/openclaw/openclaw.fragment.json
+```
+
+verify 默认不通过。下面任何一条都会报错：exec / 浏览器 / web 工具进了白名单、沙箱不是 all、heartbeat 没关、gateway 不是 loopback、Telegram 私聊不止你本人、定时任务的 agent 能从聊天里触发、gateway 上还有别的 agent。
+
+**Spike 清单（在 WSL2 里由你执行）**
+
+1. 按官方文档装固定版本的 OpenClaw，装完跑 `openclaw config schema`，核对 `agents.entries`、`bindings`、`channels.telegram`、`mcpServers.toolFilter` 和 `openclaw cron add` 的参数。生成器按 2026-09 的文档写，键名变了只需要改 `src/jha/openclaw.py`
+2. 保活：`/etc/wsl.conf` 里设 `[boot] systemd=true`，gateway 用 systemd 用户服务；Windows 的 `%USERPROFILE%/.wslconfig` 里设 `vmIdleTimeout=-1` 和 `instanceIdleTimeout=-1`
+3. Windows 这边的 venv 装上 MCP SDK：`pip install -e ".[openclaw]"`
+4. 验证六件事：MCP 能从 WSL 拉起 Windows 的 python；transcript 里发给模型的工具只有白名单；isolated + light-context 单次 run 的 input tokens；关掉所有终端 1 小时后 gateway 还在；电脑睡眠唤醒后 cron 会不会补跑（不补跑就用 Windows 任务计划兜底 mail-detect）；别人的 Telegram 账号发来的消息被拒绝
+5. 配置文件里查不到的三件事要自己确认：没装 ClawHub 上的 skill、OpenClaw 版本已固定、保活已配
+
+**记账缺口**：OpenClaw 自己跑 agent 的模型费用不经过我们的 `Budget`。这些 run 在 `agent runs` 里 `model` 是 `openclaw`，成本记为 0；工具内部的第二层调用照常记进 `agent spend`。
 
 ### 预算是硬的
 
@@ -353,7 +389,7 @@ Windows 上 Python 默认编码是 cp1252，而 JD 文本里满是非 ASCII（�
 ./.venv/Scripts/python.exe -m pytest -q
 ```
 
-85 个测试，全部离线。重点覆盖状态推导（状态机每条边 + ghosted 规则 + 人工更正通道）、append-only 触发器、母简历 ID 完整性、以及 ATS token 提取。
+540 个测试，全部离线（另有 7 个默认跳过，含打真实接口的 `--live` 冒烟测试）。重点覆盖状态推导（状态机每条边 + ghosted 规则 + 人工更正通道）、append-only 触发器、母简历 ID 完整性、ATS token 提取、工具边界、邮件只读，以及外壳配置的每一种改松方式。
 
 ---
 
@@ -370,12 +406,14 @@ src/jha/    schema.sql, db.py, status.py, profile.py, cli.py
   questions.py Phase 4 申请表问题三档处理
   mail/       Phase 5 只读 IMAP、预过滤、分类、匹配、分级策略、确认队列
   prep.py     Phase 5 面试准备材料
+  mcp_server.py 外壳：按任务收窄的 MCP 服务器（边界在我们这边再守一次）
+  openclaw.py 外壳：生成 OpenClaw 配置，检查有没有被改松
   render.py   HTML 模板 → Playwright PDF + 一页约束循环
   verify.py   确定性幻觉校验器
   sources/  三个 ATS 适配器 + RawJob 归一化
   tools/    resolve_ats.py
             filters.py（规则初筛）, ingest.py（抓取管线）, notify.py
-tests/      166 个离线测试 + 5 个 --live 冒烟测试
+tests/      540 个离线测试 + 7 个默认跳过（含 --live 冒烟测试）
   fixtures/ 从真实接口抓的样本，保证测试离线且确定
 data/       SQLite 库（gitignored；Phase 7 会加每日备份）
 ```
@@ -384,14 +422,7 @@ data/       SQLite 库（gitignored；Phase 7 会加每日备份）
 
 ## 下一步
 
-按路线图的顺序，接下来是 **Phase 2（JD 分析与匹配）**：给每个岗位出结构化分析 +
-匹配档位（`strong_apply` / `apply` / `stretch` / `skip`）+ gap 列表。
-
-但在那之前有两件更要紧的事：
-
-1. **扩充 `config/companies.yaml`。** 现在只有 Databricks 和 Ramp 两个示例。
-   路线图建议 30–80 家。用 `agent resolve-ats` 批量查 board_token。
-2. **给母简历的 bullet 补数字。** 12/12 条没有量化结果，这会直接卡住 Phase 3 的选材。
-
-Phase 6（面试模拟）对流水线零依赖，随时可以插进来——而且它能反过来帮你做第 2 件事：
-模拟面试追问「这个数据怎么来的」，正好逼出那些缺失的数字。
+1. **OpenClaw spike**（半天，在 WSL2 里）：见上面「OpenClaw 外壳」的清单。前三件（MCP 连通、白名单生效、token 开销）任何一件不成立就停下，退回 Windows 任务计划 + `agent run --schedule`。
+2. **填 `.env`**：`ANTHROPIC_API_KEY`、`IMAP_USER` / `IMAP_APP_PASSWORD`、`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`。没有它们，邮件管线和推送都跑不起来。
+3. **扩充 `config/companies.yaml`**：现在只有两家，路线图建议 30–80 家。用 `agent resolve-ats` 批量查 board_token。
+4. **Phase 6 面试模拟。**

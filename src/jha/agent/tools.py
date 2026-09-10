@@ -257,12 +257,15 @@ def list_applications(conn: sqlite3.Connection, status: str | None = None) -> li
 
 @tool(
     "get_fetch_health",
-    "看抓取器健康状况：最近一次抓取失败的公司。"
-    "抓取静默失败是最危险的失败模式——你会以为最近没新岗位，实际适配器挂了两周。",
+    "看抓取器和邮件检测的健康状况：最近一次抓取失败的公司；邮件检测上次成功是什么时候、"
+    "是否已经过期（mail.stale）。静默失败是最危险的失败模式——你会以为最近没新岗位、"
+    "没面试邀请，实际是抓取器或邮件检测挂了。",
     Permission.READ,
     _obj({}),
 )
 def get_fetch_health(conn: sqlite3.Connection) -> dict:
+    from ..mail import pipeline as mail_pipeline
+
     failures = [dict(r) for r in ingest.failing_sources(conn)]
     recent = [
         dict(r)
@@ -270,10 +273,11 @@ def get_fetch_health(conn: sqlite3.Connection) -> dict:
             "SELECT r.source, c.name AS company, r.started_at, r.ok, r.listed_count, "
             "r.kept_count, r.new_count, r.detail_fetches, r.error "
             "FROM fetch_runs r LEFT JOIN companies c ON c.id = r.company_id "
+            "WHERE r.source != 'imap' "
             "ORDER BY r.started_at DESC, r.id DESC LIMIT 10"
         )
     ]
-    return {"failing": failures, "recent_runs": recent}
+    return {"failing": failures, "recent_runs": recent, "mail": mail_pipeline.mail_health(conn)}
 
 
 # ---------------------------------------------------------------------------
@@ -644,8 +648,14 @@ def sweep_emails(conn: sqlite3.Connection, since_days: int = 14) -> dict:
     from ..mail import pipeline as mail_pipeline
     from ..mail.imap import MailReader
 
-    fetched, new = mail_pipeline.ingest(conn, MailReader(), since_days=max(1, int(since_days)))
-    rep = mail_pipeline.process_pending(conn)
+    try:
+        fetched, new = mail_pipeline.ingest(conn, MailReader(), since_days=max(1, int(since_days)))
+        rep = mail_pipeline.process_pending(conn)
+    except Exception as exc:
+        # 失败也要留痕，否则「检测挂了」和「没有新邮件」看起来一模一样
+        mail_pipeline.record_sweep(conn, error=f"{type(exc).__name__}: {exc}")
+        raise
+    mail_pipeline.record_sweep(conn, fetched=fetched, new=new, rep=rep)
     return {"fetched": fetched, "new": new, **rep.compact()}
 
 

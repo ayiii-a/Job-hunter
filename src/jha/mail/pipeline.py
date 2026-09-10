@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
 from .. import db
@@ -267,3 +267,71 @@ def dismiss(conn: sqlite3.Connection, email_id: int, *, note: str = "") -> dict[
         raise ValueError(f"邮件 #{email_id} 不在待确认队列里")
     conn.commit()
     return {"email_id": email_id, "review_status": "dismissed"}
+
+
+# ---------------------------------------------------------------------------
+# 检测留痕与即时提醒
+# ---------------------------------------------------------------------------
+
+#: 超过这么久没有一次**成功**的邮件检测，就算过期
+MAIL_STALE_AFTER = timedelta(hours=6)
+
+
+def record_sweep(
+    conn: sqlite3.Connection, *, fetched: int = 0, new: int = 0,
+    rep: SweepReport | None = None, error: str | None = None,
+) -> None:
+    """每次真的去邮箱拉过信，就在 fetch_runs 里留一行（source='imap'）。
+
+    邮件检测静默停掉是这个模块最危险的失败：外壳挂了、电脑睡着了、应用专用密码被撤了，
+    你看到的只是「最近没有面试邀请」。留了这一行，`mail_health` 才能把沉默变成告警。
+
+    company_id 留空——`ingest.failing_sources` 按公司关联，这些行不会混进抓取器的告警。
+    """
+    conn.execute(
+        "INSERT INTO fetch_runs (company_id, source, finished_at, ok, listed_count, "
+        "kept_count, new_count, error) VALUES (NULL, 'imap', datetime('now'), ?, ?, ?, ?, ?)",
+        (0 if error else 1, fetched, rep.classified if rep else 0, new, error),
+    )
+    conn.commit()
+
+
+def mail_health(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[str, Any]:
+    """邮件检测还活着吗。
+
+    fetch_runs 的时间来自 SQLite 的 datetime('now')，**是 UTC**。拿本地时间去比，
+    在美东会差 4–5 小时——过期要晚半天才报出来，正好是这个函数要防的那种沉默。
+    失败的检测不算数：密码过期之后每次都「跑了」，但一次都没成功。
+    """
+    now = now or datetime.now(timezone.utc).replace(tzinfo=None)
+    last = conn.execute(
+        "SELECT started_at, ok, error FROM fetch_runs WHERE source = 'imap' "
+        "ORDER BY started_at DESC, id DESC LIMIT 1"
+    ).fetchone()
+    last_ok = conn.execute(
+        "SELECT MAX(started_at) AS m FROM fetch_runs WHERE source = 'imap' AND ok = 1"
+    ).fetchone()["m"]
+    stale = last_ok is None or now - db._parse_dt(last_ok) > MAIL_STALE_AFTER
+    return {
+        "last_sweep_at_utc": last["started_at"] if last else None,
+        "last_sweep_ok": bool(last["ok"]) if last else None,
+        "last_error": last["error"] if last else None,
+        "last_success_at_utc": last_ok,
+        "stale": stale,
+        "stale_after_hours": int(MAIL_STALE_AFTER.total_seconds() // 3600),
+    }
+
+
+def alert_text(alerts: list[dict[str, Any]]) -> str:
+    """即时提醒的推送文本。
+
+    这条推送不经过模型，但它是发出去的东西，所以和给 agent 的输出守同一条线：
+    只拼库里的字段（公司、岗位来自我们的库，类型是分类器的枚举值），
+    **不含主题行和正文**。要看原文，回电脑上跑 agent mail show。
+    """
+    lines = [f"{len(alerts)} 封邮件需要你尽快处理："]
+    for a in alerts:
+        where = f"{a.get('company') or '?'} — {a.get('job_title') or '未匹配到投递'}"
+        lines.append(f"#{a.get('email_id')} [{a.get('type')}] {where}")
+    lines.append("在电脑上看：agent mail queue")
+    return "\n".join(lines)

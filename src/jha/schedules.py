@@ -11,6 +11,8 @@
 
 顺带拿到的第二个好处是**爆炸半径**：抓岗位的任务够不着改投递状态的工具，
 哪怕它被 JD 里的注入内容说服了。这是「工具即边界」用在任务粒度上。
+
+每个任务还可以带一个 `openclaw` 块，说明 OpenClaw 外壳怎么调度它（见 openclaw.py）。
 """
 
 from __future__ import annotations
@@ -19,10 +21,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from . import config, profile
+from .agent.client import PRICING
 from .agent.tools import REGISTRY, Permission
 
 DEFAULT_MAX_TURNS = 8
 DEFAULT_MAX_LLM_CALLS = 20
+
+#: openclaw 块里允许的字段。说明见 schedules.example.yaml 末尾
+OPENCLAW_KEYS = frozenset({"cron", "chat", "model"})
+CHAT_CHANNELS = frozenset({"telegram"})
 
 
 @dataclass
@@ -35,6 +42,7 @@ class Schedule:
     max_llm_calls: int = DEFAULT_MAX_LLM_CALLS
     allow_notify: bool = False
     notes: str = ""
+    openclaw: dict[str, str] = field(default_factory=dict)   # 空 = 不交给外壳
 
     def summary(self) -> str:
         scope = (
@@ -42,12 +50,61 @@ class Schedule:
             else (f"{'/'.join(sorted(p.value for p in self.permissions))} 档"
                   if self.permissions else "全部工具")
         )
+        shell = ""
+        if self.openclaw:
+            how = (f"cron {self.openclaw['cron']}" if "cron" in self.openclaw
+                   else f"聊天 {self.openclaw['chat']}")
+            shell = f"  外壳：{how}"
         return (f"{self.name:<16} {scope:<14} 最多 {self.max_turns} 轮 / "
-                f"{self.max_llm_calls} 次调用" + ("  外发已授权" if self.allow_notify else ""))
+                f"{self.max_llm_calls} 次调用" + ("  外发已授权" if self.allow_notify else "")
+                + shell)
 
 
 class ScheduleError(ValueError):
     pass
+
+
+def _parse_openclaw(name: str, raw: Any) -> dict[str, str]:
+    """外壳调度设置。
+
+    写错必须报错：cron 表达式少一段，OpenClaw 那边不一定报，任务只是永远不跑；
+    model 没写，外壳会用它自己的默认模型，账就对不上了。
+    """
+    if not raw:
+        return {}
+    if not isinstance(raw, dict):
+        raise ScheduleError(f"定时任务 {name} 的 openclaw 应该是一个映射")
+    unknown = set(raw) - OPENCLAW_KEYS
+    if unknown:
+        raise ScheduleError(
+            f"定时任务 {name} 的 openclaw 有不认识的字段：{sorted(unknown)}。"
+            f"认识的：{sorted(OPENCLAW_KEYS)}"
+        )
+
+    cron, chat = raw.get("cron"), raw.get("chat")
+    if bool(cron) == bool(chat):
+        raise ScheduleError(
+            f"定时任务 {name} 的 openclaw 要么写 cron（定时跑），要么写 chat（聊天入口），只能二选一"
+        )
+    if cron and len(str(cron).split()) != 5:
+        raise ScheduleError(f"定时任务 {name} 的 openclaw.cron 不是五段 cron 表达式：{cron!r}")
+    if chat and chat not in CHAT_CHANNELS:
+        raise ScheduleError(f"定时任务 {name} 的 openclaw.chat 只支持 {sorted(CHAT_CHANNELS)}")
+
+    model = raw.get("model")
+    if not model:
+        raise ScheduleError(
+            f"定时任务 {name} 的 openclaw 没写 model——外壳会用它自己的默认模型，账就对不上了"
+        )
+    if model not in PRICING:
+        raise ScheduleError(f"定时任务 {name} 的 openclaw.model 不在 PRICING 里：{model}")
+
+    out = {"model": str(model)}
+    if cron:
+        out["cron"] = str(cron)
+    if chat:
+        out["chat"] = str(chat)
+    return out
 
 
 def _parse_one(name: str, raw: dict[str, Any]) -> Schedule:
@@ -89,11 +146,19 @@ def _parse_one(name: str, raw: dict[str, Any]) -> Schedule:
             f"定时任务 {name} 授权了 allow_notify，但 tools 里没有 send_notification"
         )
 
+    shell = _parse_openclaw(name, raw.get("openclaw"))
+    if shell and not tool_set and not perm_set:
+        raise ScheduleError(
+            f"定时任务 {name} 要交给外壳（openclaw），但没有收窄工具。"
+            "外壳的配置我们管不着，交出去的工具必须先收窄"
+        )
+
     return Schedule(
         name=name, task=task, tools=tool_set, permissions=perm_set,
         max_turns=int(raw.get("max_turns") or DEFAULT_MAX_TURNS),
         max_llm_calls=int(raw.get("max_llm_calls") or DEFAULT_MAX_LLM_CALLS),
         allow_notify=allow_notify, notes=(raw.get("notes") or "").strip(),
+        openclaw=shell,
     )
 
 

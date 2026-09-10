@@ -12,6 +12,8 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0"]
+# OpenClaw 外壳：python -m jha.mcp_server 需要它。不用外壳就不必装
+openclaw = ["mcp>=1.0"]
 
 [project.scripts]
 agent = "jha.cli:main"

@@ -181,3 +181,50 @@ def test_shipped_schedules_do_not_auto_send(tmp_path):
     data = profile.load_yaml(config.CONFIG_DIR / "schedules.example.yaml")
     for name, raw in (data.get("schedules") or {}).items():
         assert not schedules._parse_one(name, raw or {}).allow_notify, name
+
+
+def test_phone_query_is_read_only():
+    """聊天入口中间隔着一个模型——只读是刻意的，确认面试邀请这类事回电脑上做。"""
+    from jha import profile
+
+    data = profile.load_yaml(config.CONFIG_DIR / "schedules.example.yaml")
+    s = schedules._parse_one("phone-query", data["schedules"]["phone-query"])
+    assert s.tools and all(tools_mod.REGISTRY[t].permission is Permission.READ for t in s.tools)
+    assert s.openclaw.get("chat") == "telegram"
+
+
+def test_email_sweep_does_not_push_through_the_agent():
+    """即时提醒走确定性的 mail sweep --push-alerts，不经过模型。"""
+    from jha import profile
+
+    data = profile.load_yaml(config.CONFIG_DIR / "schedules.example.yaml")
+    s = schedules._parse_one("email-sweep", data["schedules"]["email-sweep"])
+    assert "send_notification" not in s.tools and not s.allow_notify
+    assert "get_fetch_health" in s.tools
+
+
+# ---------------------------------------------------------------------------
+# openclaw 块：写错要报错，不能让任务悄悄永远不跑
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("block, match", [
+    ("openclaw:\n      model: claude-haiku-4-5", "二选一"),
+    ("openclaw:\n      cron: '0 9 * * *'\n      chat: telegram\n      model: claude-haiku-4-5", "二选一"),
+    ("openclaw:\n      cron: '0 9 * *'\n      model: claude-haiku-4-5", "五段"),
+    ("openclaw:\n      chat: slack\n      model: claude-haiku-4-5", "telegram"),
+    ("openclaw:\n      cron: '0 9 * * *'", "model"),
+    ("openclaw:\n      cron: '0 9 * * *'\n      model: gpt-9", "PRICING"),
+    ("openclaw:\n      cron: '0 9 * * *'\n      model: claude-haiku-4-5\n      tools: [exec]", "不认识"),
+])
+def test_bad_openclaw_block_is_an_error(tmp_path, monkeypatch, block, match):
+    write(tmp_path, monkeypatch, f"schedules:\n  x:\n    task: t\n    tools: [list_jobs]\n    {block}\n")
+    with pytest.raises(schedules.ScheduleError, match=match):
+        schedules.load_all()
+
+
+def test_openclaw_block_requires_scoped_tools(tmp_path, monkeypatch):
+    """外壳的配置我们管不着，交出去的工具必须先收窄。"""
+    write(tmp_path, monkeypatch,
+          "schedules:\n  x:\n    task: t\n    openclaw:\n      cron: '0 9 * * *'\n      model: claude-haiku-4-5\n")
+    with pytest.raises(schedules.ScheduleError, match="收窄"):
+        schedules.load_all()

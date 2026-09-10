@@ -915,6 +915,72 @@ def cmd_answers(args: argparse.Namespace) -> int:
 
 
 # ---------------------------------------------------------------------------
+# OpenClaw 外壳
+# ---------------------------------------------------------------------------
+
+def cmd_openclaw_config(args: argparse.Namespace) -> int:
+    from . import openclaw
+    from . import schedules as sched_mod
+
+    try:
+        bundle = openclaw.generate(
+            sched_mod.load_all(), settings=openclaw.load_settings(),
+            telegram_id=args.telegram_id or config.env("TELEGRAM_CHAT_ID"),
+            python_path=args.python, agent_path=args.agent,
+        )
+    except (sched_mod.ScheduleError, openclaw.ShellConfigError) as exc:
+        _err(str(exc))
+        return 1
+
+    for w in bundle.warnings:
+        _warn(w)
+    if args.out:
+        for p in openclaw.write_bundle(bundle, Path(args.out)):
+            _ok(f"写入 {p}")
+    else:
+        print(json.dumps(bundle.config, ensure_ascii=False, indent=2))
+        print()
+        print("# cron 作业")
+        for c in bundle.cron_commands:
+            print(c)
+        for aid, text in sorted(bundle.agents_md.items()):
+            print()
+            print(f"# {aid}/AGENTS.md")
+            print(text)
+
+    print()
+    print("下一步由你来做（这里不会碰 ~/.openclaw）：")
+    print("  1. 在 WSL 里跑 openclaw config schema，核对上面的键名——OpenClaw 迭代快")
+    print("  2. 把片段合进 openclaw.json，AGENTS.md 放进对应的 workspace")
+    print("  3. agent openclaw verify <openclaw.json 的路径>")
+    print("  4. 逐条确认后再跑 cron 命令")
+    return 0
+
+
+def cmd_openclaw_verify(args: argparse.Namespace) -> int:
+    from . import openclaw
+    from . import schedules as sched_mod
+
+    try:
+        cfg = openclaw.load_config(Path(args.path))
+        problems = openclaw.verify(cfg, sched_mod.load_all(),
+                                   telegram_id=config.env("TELEGRAM_CHAT_ID"))
+    except (sched_mod.ScheduleError, openclaw.ShellConfigError) as exc:
+        _err(str(exc))
+        return 1
+
+    if problems:
+        for p in problems:
+            _err(p)
+        print()
+        print(f"{len(problems)} 处不满足。外壳的边界是配置，改松了它不会报错——所以这里报。")
+        return 1
+    _ok("外壳配置通过检查")
+    _warn("配置文件里查不到的几件事要你自己确认：没装 ClawHub 上的 skill、OpenClaw 版本已固定、WSL 保活已配")
+    return 0
+
+
+# ---------------------------------------------------------------------------
 # Phase 5：邮件
 # ---------------------------------------------------------------------------
 
@@ -925,15 +991,21 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
 
     conn = db.connect()
     db.init_db(conn)
+    fetched = new = 0
     try:
         if not args.no_fetch:
             fetched, new = mp.ingest(conn, MailReader(), since_days=args.since_days)
             _ok(f"拉取 {fetched} 封，新增 {new} 封（只读：EXAMINE + BODY.PEEK，不会把邮件标成已读）")
         rep = mp.process_pending(conn, limit=args.limit)
     except (MailError, MissingAPIKey) as exc:
+        if not args.no_fetch:
+            mp.record_sweep(conn, fetched=fetched, new=new, error=str(exc))
         conn.close()
         _err(str(exc))
         return 1
+    if not args.no_fetch:
+        # 只有真的去邮箱拉过才算一次检测——--no-fetch 不能让「检测已过期」的告警闭嘴
+        mp.record_sweep(conn, fetched=fetched, new=new, rep=rep)
     conn.close()
 
     print(f"  预过滤丢弃 {rep.filtered} · 分类 {rep.classified} · 自动写入 {rep.auto_applied}"
@@ -946,6 +1018,13 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
         for a in rep.alerts:
             where = f"{a.get('company') or '?'} — {a.get('job_title') or '未匹配'}"
             print(f"      #{a['email_id']} [{a.get('type')}] {where}")
+        if args.push_alerts:
+            # 确定性推送：不经过模型，文本只含库里的字段（mail/pipeline.py::alert_text）
+            res = notify.send(mp.alert_text(rep.alerts))
+            if not res.sent:
+                _err(f"推送失败：{res.detail}")
+                return 1
+            _ok("已推送到 Telegram")
     if rep.queued:
         print("\n  看队列：agent mail queue")
     return 0
@@ -1190,6 +1269,8 @@ def build_parser() -> argparse.ArgumentParser:
     msw.add_argument("--since-days", type=int, default=14)
     msw.add_argument("--limit", type=int, default=60, help="本次最多分类几封（控制成本）")
     msw.add_argument("--no-fetch", action="store_true", help="不拉新邮件，只处理库里还没处理的")
+    msw.add_argument("--push-alerts", action="store_true",
+                     help="有面试邀请 / OA / offer 时推到 Telegram。确定性推送，不经过模型；给定时任务用")
     msw.set_defaults(func=cmd_mail_sweep)
     mlsub.add_parser("queue", help="人工确认队列").set_defaults(func=cmd_mail_queue)
     msh = mlsub.add_parser("show", help="看一封邮件的全文和链接")
@@ -1207,6 +1288,18 @@ def build_parser() -> argparse.ArgumentParser:
     pp = sub.add_parser("prep", help="为某条投递生成面试准备材料")
     pp.add_argument("application_id", type=int)
     pp.set_defaults(func=cmd_prep)
+
+    oc = sub.add_parser("openclaw", help="OpenClaw 外壳：生成配置、检查配置有没有被改松")
+    ocsub = oc.add_subparsers(dest="sub", required=True)
+    occ = ocsub.add_parser("config", help="从 schedules.yaml 生成 OpenClaw 配置片段（不碰 ~/.openclaw）")
+    occ.add_argument("--telegram-id", help="你的 Telegram 用户 id（默认取 .env 的 TELEGRAM_CHAT_ID）")
+    occ.add_argument("--out", help="写到这个目录（建议 data/openclaw）：配置片段、cron 命令、各 agent 的 AGENTS.md")
+    occ.add_argument("--python", help="WSL 里看到的 venv python 路径（默认按项目位置推算）")
+    occ.add_argument("--agent", help="WSL 里看到的 agent.exe 路径（默认按项目位置推算）")
+    occ.set_defaults(func=cmd_openclaw_config)
+    ocv = ocsub.add_parser("verify", help="检查一份 openclaw.json：工具白名单、沙箱、heartbeat、谁能发消息")
+    ocv.add_argument("path")
+    ocv.set_defaults(func=cmd_openclaw_verify)
 
     ta = sub.add_parser("tailor", help="为某个岗位定制简历（选材 + 渲染 + 幻觉校验）")
     ta.add_argument("job_id", type=int)

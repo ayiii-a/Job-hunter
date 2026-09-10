@@ -15,6 +15,7 @@
 #   max_turns      最多几轮工具往返
 #   max_llm_calls  预算硬上限，超了就停并汇报已完成的部分
 #   allow_notify   本任务是否授权推送。外发不可撤回，必须在这里显式写
+#   openclaw       （可选）OpenClaw 外壳怎么调度它，见文件末尾
 #
 # --- 收窄工具的意义 ---
 # 省 token 只是顺带（实测 daily-jobs 每轮省约 1,500 tokens，月省 $2 出头）。
@@ -48,6 +49,9 @@ schedules:
     max_turns: 8
     max_llm_calls: 20
     allow_notify: false        # 想让它自动推到 Telegram 就改成 true
+    openclaw:
+      cron: "0 9 * * *"          # 每天 9:00
+      model: claude-sonnet-5
     notes: "Phase 1 + Phase 2 的日常驱动"
 
   # ---------------------------------------------------------------------
@@ -68,29 +72,81 @@ schedules:
     permissions: [read]
     max_turns: 6
     max_llm_calls: 12
+    openclaw:
+      cron: "0 10 * * 0"         # 每周日 10:00
+      model: claude-sonnet-5
     notes: "只读。发现问题交给人处理，不代劳"
 
   # ---------------------------------------------------------------------
-  # 每 30–60 分钟一次。分类在工具内部做，邮件正文不进 agent 上下文。
+  # 每天一次的邮件总结。面试邀请的【即时】提醒不走这里：
+  # 由 agent mail sweep --push-alerts 每 1–2 小时跑一次——确定性代码，不经过模型。
+  # 分类在工具内部做，邮件正文不进 agent 上下文。
   # agent 没有确认面试邀请的能力——那些进人工队列，由你跑 agent mail accept。
   # ---------------------------------------------------------------------
   email-sweep:
     task: |
       拉取新邮件并处理。然后简要告诉我：
 
+      - 邮件检测上一次成功是什么时候；如果已经过期（get_fetch_health 的 mail.stale），放在第一行说
       - 自动写入了哪些（确认邮件、拒信）
       - 人工确认队列里有什么——offer、面试邀请、OA 放最前面，说清楚是哪家公司哪个岗位
       - 有没有投出去 24 小时还没收到确认邮件的
 
       你没有确认面试邀请的能力，也不需要去做——列出来，让我自己跑 agent mail accept。
-      如果有 offer、面试邀请或 OA，用 send_notification 推一条给我：只写公司、岗位、类型和邮件 id。
     tools:
       - sweep_emails
       - list_email_queue
       - get_tracking
       - check_confirmations
-      - send_notification
+      - get_fetch_health
     max_turns: 6
     max_llm_calls: 12
-    allow_notify: false        # 面试邀请想即时收到就改成 true；不改的话推送停在「待批准」
+    openclaw:
+      cron: "0 21 * * *"         # 每天 21:00
+      model: claude-haiku-4-5
     notes: "Phase 5。只读邮箱，只自动写可纠正的事件"
+
+  # ---------------------------------------------------------------------
+  # 不定时。OpenClaw 的聊天入口：你在手机上问，它只读回答。
+  # 只读是刻意的——这条路中间隔着一个模型，确认面试邀请、批准简历这类事回电脑上做。
+  # ---------------------------------------------------------------------
+  phone-query:
+    task: |
+      你在 Telegram 里回答我关于求职进度的问题，只看不改。
+
+      - 回答要短，手机上看得完：先给结论，再给数字
+      - 提到投递或邮件时带上 id，方便我回电脑上处理
+      - 需要确认面试邀请、批准简历、记录投递的，告诉我在电脑上跑哪条命令
+    tools:
+      - list_email_queue
+      - get_tracking
+      - list_applications
+      - check_confirmations
+      - rank_jobs
+      - get_analysis
+      - list_contacts
+      - get_prep_pack
+      - get_fetch_health
+    max_turns: 4
+    max_llm_calls: 6
+    openclaw:
+      chat: telegram
+      model: claude-haiku-4-5
+    notes: "OpenClaw 聊天入口，不进 cron。只读"
+
+
+# -------------------------------------------------------------------------
+# OpenClaw 外壳（可选）。agent openclaw config 从这份文件生成 OpenClaw 配置，
+# agent openclaw verify 检查你实际用的配置有没有被改松。
+#
+# 每个任务里的 openclaw 块决定外壳怎么调度它：
+#   cron   五段 cron 表达式。用 isolated 会话 + light-context 跑，结果推给你
+#   chat   绑定到聊天入口（目前只支持 telegram），你发消息时才跑
+#   model  外壳用哪个模型跑这个 agent，必须是 PRICING 里有的
+# 没有 openclaw 块的任务不会出现在外壳里。
+#
+# 外壳拿到的工具 = 任务的 tools − GATED 工具。send_notification 永远不交给外壳：
+# 推送由 cron 的 announce 发到固定收件人，不经过 agent 的工具调用。
+# -------------------------------------------------------------------------
+openclaw:
+  mail_detect_every: 2h        # agent mail sweep --push-alerts 的频率
