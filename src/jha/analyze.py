@@ -18,11 +18,11 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Sequence
 
 from . import db, profile
 from .agent.client import AgentClient, Budget, BudgetExceeded, MissingAPIKey
-from .filters import _pattern
+from .filters import _first_match, _pattern
 
 #: 改 prompt 或 schema 就 bump。不 bump 的话新旧判定不可比，
 #: 而 Phase 7 要按周看趋势（路线图 §2「job_analysis.scorer_version」）。
@@ -245,22 +245,31 @@ def _store(
 # ---------------------------------------------------------------------------
 
 def pending_jobs(
-    conn: sqlite3.Connection, *, job_ids: list[int] | None = None, limit: int = 25
+    conn: sqlite3.Connection, *, job_ids: list[int] | None = None, limit: int = 25,
+    priority_terms: Sequence[str] = (),
 ) -> list[sqlite3.Row]:
-    """挑出需要分析的岗位：还没分析过，或者分析器版本已经过期。"""
+    """挑出需要分析的岗位：还没分析过，或者分析器版本已经过期。
+
+    排队顺序：标题命中 priority_terms（target_profile 的 analyze_first，比如 New Grad）的最先，
+    其次按初筛档位（没有档位的排最后）、越新越先。每次只取 limit 个——钱先花在最可能投的岗位上。
+    """
     sql = (
         "SELECT j.*, c.name AS company FROM jobs j "
         "LEFT JOIN companies c ON c.id = j.company_id "
         "LEFT JOIN job_analysis a ON a.job_id = j.id AND a.scorer_version = ? "
-        "WHERE j.is_active = 1 AND j.jd_text IS NOT NULL AND a.id IS NULL "
+        "WHERE j.is_active = 1 AND j.screened_out_at IS NULL "
+        "AND j.jd_text IS NOT NULL AND a.id IS NULL "
     )
     params: list[Any] = [ANALYZER_VERSION]
     if job_ids:
         sql += f"AND j.id IN ({','.join('?' * len(job_ids))}) "
         params += list(job_ids)
-    sql += "ORDER BY j.screen_tier, j.first_seen_at DESC LIMIT ?"
-    params.append(limit)
-    return conn.execute(sql, params).fetchall()
+    sql += "ORDER BY j.screen_tier IS NULL, j.screen_tier, j.first_seen_at DESC"
+    rows = conn.execute(sql, params).fetchall()
+    if priority_terms:
+        # 稳定排序：命中关键词的整组提前，组内保持上面 SQL 的顺序
+        rows.sort(key=lambda r: _first_match(r["title"], priority_terms) is None)
+    return rows[:limit]
 
 
 def analyze_jobs(
@@ -272,11 +281,12 @@ def analyze_jobs(
     budget: Budget | None = None,
 ) -> list[AnalysisResult]:
     """批量分析。**每条一次独立调用**——这是 §1.1 分层设计的落点。"""
-    jobs = pending_jobs(conn, job_ids=job_ids, limit=limit)
+    target = profile.load_target_profile()
+    jobs = pending_jobs(conn, job_ids=job_ids, limit=limit,
+                        priority_terms=target.get("analyze_first") or ())
     if not jobs:
         return []
     client = client or AgentClient()
-    target = profile.load_target_profile()
     brief = _candidate_brief(profile.load_master_profile(), target)
     budget = budget or Budget(max_llm_calls=max(len(jobs) + 2, 10))
     return [

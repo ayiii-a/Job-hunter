@@ -138,3 +138,36 @@ def format_digest(
         lines.append(f"（还有 {len(new_jobs) - shown} 个，用 agent jobs list 看全部）")
 
     return "\n".join(lines)
+
+
+def format_recommended(
+    jobs: Sequence[dict[str, Any]], *, analyzed: int, failures: Sequence[Any] = (),
+) -> str:
+    """新判为推荐投递的岗位（调用方已按推荐顺序排好）。没有可推的就返回空串。
+
+    只拼结构化字段：公司、岗位、地点、薪资、链接来自招聘系统，档位和分数是分析器的
+    枚举和整数。分析器写的 gap、理由这类自由文本**不进推送**——它们是读 JD 生成的，
+    而 JD 是不可信输入。
+    """
+    lines: list[str] = []
+    if failures:
+        lines.append(f"⚠️ {len(failures)} 家最近一次抓取失败，跑 agent fetch --explain 看原因")
+    if jobs:
+        if lines:
+            lines.append("")
+        lines.append(f"★ 新增推荐投递 {len(jobs)} 个（本次分析 {analyzed} 个）")
+        for i, job in enumerate(jobs, 1):
+            label = "强烈推荐" if job.get("verdict") == "strong_apply" else "推荐"
+            score = job.get("match_score")
+            score_txt = f" {score}" if score is not None else ""
+            lines.append("")
+            lines.append(f"{i}. [{label}{score_txt}] {job.get('company')} — {job.get('title')}")
+            meta = " · ".join(x for x in (job.get("location"), job.get("salary")) if x)
+            if meta:
+                lines.append(f"   {meta}")
+            if job.get("referral"):
+                lines.append(f"   先找 {'、'.join(job['referral'][:3])} 要内推")
+            if job.get("url"):
+                lines.append(f"   {job['url']}")
+            lines.append(f"   agent tailor {job.get('job_id')}")
+    return "\n".join(lines)

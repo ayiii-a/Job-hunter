@@ -29,13 +29,14 @@ basics:
 # skills —— 每个技能一个 id。experiences.tech 和 bullets.skills 都引用这些 id。
 #           level: beginner | intermediate | advanced | expert
 # ---------------------------------------------------------------------------
+# category：简历的技能栏按它分组展示，组的先后跟岗位相关度走
 skills:
-  - {id: sk_python,    name: Python,     level: expert,       years: 6}
-  - {id: sk_typescript, name: TypeScript, level: advanced,     years: 4}
-  - {id: sk_postgres,  name: PostgreSQL, level: advanced,     years: 5}
-  - {id: sk_k8s,       name: Kubernetes, level: intermediate, years: 3}
-  - {id: sk_aws,       name: AWS,        level: advanced,     years: 4}
-  - {id: sk_react,     name: React,      level: intermediate, years: 3}
+  - {id: sk_python,    name: Python,     level: expert,       years: 6, category: "Languages"}
+  - {id: sk_typescript, name: TypeScript, level: advanced,     years: 4, category: "Languages"}
+  - {id: sk_postgres,  name: PostgreSQL, level: advanced,     years: 5, category: "Data & Infrastructure"}
+  - {id: sk_k8s,       name: Kubernetes, level: intermediate, years: 3, category: "Data & Infrastructure"}
+  - {id: sk_aws,       name: AWS,        level: advanced,     years: 4, category: "Data & Infrastructure"}
+  - {id: sk_react,     name: React,      level: intermediate, years: 3, category: "Frontend"}
 
 
 # ---------------------------------------------------------------------------

@@ -261,11 +261,14 @@ def test_unapproved_resume_cannot_be_attached_to_an_application(conn):
     assert conn.execute("SELECT COUNT(*) c FROM applications").fetchone()["c"] == 0
 
 
-def test_approved_resume_can_be_attached(conn):
+def test_approved_resume_can_be_attached(conn, tmp_path):
     from jha import tailor
 
+    pdf = tmp_path / "resume.pdf"       # 没有 PDF 的版本批准不了
+    pdf.write_bytes(b"%PDF-1.4")
     conn.execute(
-        "INSERT INTO resume_versions (generated_for_job_id, page_count) VALUES (1, 1)"
+        "INSERT INTO resume_versions (generated_for_job_id, page_count, rendered_pdf_path) VALUES (1, 1, ?)",
+        (str(pdf),),
     )
     conn.commit()
     tailor.approve(conn, 1)

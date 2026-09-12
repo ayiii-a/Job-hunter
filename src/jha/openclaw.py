@@ -36,7 +36,9 @@ from .agent.tools import REGISTRY, Permission
 from .mcp_server import ScopeError, exposed_tools
 
 PREFIX = "jha-"
-DEFAULT_SETTINGS: dict[str, str] = {"mail_detect_every": "2h"}
+DEFAULT_SETTINGS: dict[str, str] = {
+    "mail_detect_every": "2h", "jobs_detect_every": "6h", "jobs_analyze_per_run": "30",
+}
 CRON_MESSAGE = "按 AGENTS.md 里的任务执行一次，然后给我简报。"
 PLACEHOLDER_USER = "<DISCORD_USER_ID>"
 
@@ -78,9 +80,12 @@ def load_settings(path: Path | None = None) -> dict[str, str]:
     if unknown:
         raise ShellConfigError(f"schedules.yaml 的顶层 openclaw 有不认识的字段：{sorted(unknown)}")
     out = {**DEFAULT_SETTINGS, **{k: str(v) for k, v in raw.items()}}
-    if not re.fullmatch(r"[1-9][0-9]*[mh]", out["mail_detect_every"]):
+    for key in ("mail_detect_every", "jobs_detect_every"):
+        if not re.fullmatch(r"[1-9][0-9]*[mh]", out[key]):
+            raise ShellConfigError(f"openclaw.{key} 应该写成 30m、2h 这样：{out[key]!r}")
+    if not re.fullmatch(r"[1-9][0-9]*", out["jobs_analyze_per_run"]):
         raise ShellConfigError(
-            f"openclaw.mail_detect_every 应该写成 30m、2h 这样：{out['mail_detect_every']!r}"
+            f"openclaw.jobs_analyze_per_run 应该是正整数：{out['jobs_analyze_per_run']!r}"
         )
     return out
 
@@ -203,6 +208,15 @@ def generate(
         "openclaw", "cron", "add", "--name", f"{PREFIX}mail-detect",
         "--every", settings["mail_detect_every"],
         "--command-argv", json.dumps([agent_exe, "mail", "sweep", "--push-alerts"], ensure_ascii=False),
+        "--no-deliver",
+    ]))
+    # 岗位也一样：抓取 → 按关键词排队分析 → 新增推荐投递推到 Discord，整条不经过 agent
+    crons.append(shlex.join([
+        "openclaw", "cron", "add", "--name", f"{PREFIX}jobs-detect",
+        "--every", settings["jobs_detect_every"],
+        "--command-argv", json.dumps(
+            [agent_exe, "fetch", "--analyze", settings["jobs_analyze_per_run"], "--push-recommended"],
+            ensure_ascii=False),
         "--no-deliver",
     ]))
 

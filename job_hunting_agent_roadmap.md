@@ -473,7 +473,7 @@ applied → oa → phone_screen → interview_loop → onsite → offer
    - 这是 Phase 3 里最容易被忽略、又一定会卡住你的工程细节。
 4. 生成 diff：相对上一版/母简历，哪些 bullet 被选中、哪些被删、措辞改了哪里，高亮展示。
 5. 审核门：你在终端或简单页面确认后，才写入 `resume_versions` 并标记 `approved_at`。
-6. 文件命名：`{Name}_Resume_{Company}_{Role}.pdf`，且和 application 记录绑定。
+6. 文件命名：`{Name}_Resume_{Company}_{Role}.pdf`，放在 `data/resumes/v{版本号}/` 下（版本号放目录不放文件名：文件名招聘方看得到；同一岗位多次生成也不会互相覆盖），且和 application 记录绑定。没有 PDF 的版本批准不了。
 
 **决策点**
 - 允许改写措辞吗？→ **第一版只做选材和排序**，不改写。等你对 agent 建立信任、且有校验器后再开。
@@ -811,7 +811,8 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
 
 | 名字 | 频率 | 权限 | 干什么 |
 |---|---|---|---|
-| `daily-jobs` | 每日 1–2 次 | WRITE；外发 GATED | 抓取 → `analyze_jobs` → 出 feed，有内推路径的排最前 |
+| `daily-jobs` | 手动 | WRITE；外发 GATED | 要一份带解释的简报时跑：抓取 → `analyze_jobs` → 出 feed，有内推路径的排最前 |
+| `fetch --analyze N --push-recommended` | 每 6 小时 | 确定性，不经过 agent | 抓取 → 按 `analyze_first` 关键词排队分析 → 新增推荐投递按推荐顺序推到 Discord（只含结构化字段） |
 | `email-sweep` | 每天一次（总结） | WRITE | `sweep_emails` → 确认邮件 / 拒信自动写入 → 面试邀请 / OA / offer 进人工队列 |
 | `mail sweep --push-alerts` | 每 1–2 小时 | 确定性，不经过模型 | 面试邀请 / OA / offer 即时推送；每次检测在 `fetch_runs` 留痕，超过 6 小时没有成功就报过期 |
 | `phone-query` | 不定时（聊天入口） | **READ-only** | 手机上查队列和进度；确认回电脑上做 |
@@ -852,7 +853,7 @@ JD 全文、`get_job` 默认不给、并在工具描述里把便宜的路子指�
 OpenClaw Gateway（WSL2，systemd 用户服务）
  ├─ cron jha-mail-detect   每 2h         command 作业：agent mail sweep --push-alerts（不经过模型）
  ├─ cron jha-email-sweep   每天 21:00    isolated + light-context，claude-haiku-4-5
- ├─ cron jha-daily-jobs    每天 9:00     isolated + light-context，claude-sonnet-5
+ ├─ cron jha-jobs-detect   每 6h         command 作业：agent fetch --analyze 30 --push-recommended（不经过 agent）
  ├─ cron jha-weekly-review 每周日 10:00  isolated + light-context，claude-sonnet-5
  ├─ jha-phone-query：绑定 Discord 私信，只读
  └─ 每个 agent 的 mcpServers → python -m jha.mcp_server --schedule <任务名>
@@ -897,7 +898,7 @@ gateway 上没有别的 agent。找不到该有的键就算问题。每一种改
 | # | 决策 | 建议 | 何时可以改 |
 |---|---|---|---|
 | 1 | 自动投递 vs 预填+人点 | 预填 + 人点 | 基本不建议改 |
-| 2 | 简历改写 vs 只选材 | 第一版只选材 | 有校验器且你审过 30+ 份后 |
+| 2 | 简历改写 vs 只选材 | **选材 + 按 JD 关键词改写**：逐条过确定性校验（不加 / 不改数字、不出现母简历以外的专名、新关键词必须在技能清单里、不明显变长），审核门上原文和改写并排对照 | `agent tailor --no-rewrite` 随时退回只选材 |
 | 3 | 岗位源 | 目标公司 ATS API 优先 | 稳定后加聚合源 |
 | 4 | 邮件状态自动更新 | 按**误判代价**分级：拒信自动，邀请类人工 | 每类型分别放开 |
 | 5 | 真相源 | 数据库；Sheet 只读视图 | 不建议改 |

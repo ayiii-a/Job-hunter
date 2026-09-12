@@ -211,6 +211,9 @@ def cmd_resolve_ats(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------
 
 def cmd_fetch(args: argparse.Namespace) -> int:
+    if args.push_recommended and not args.analyze:
+        _err("--push-recommended 要和 --analyze N 一起用：先分析，才知道哪些值得推")
+        return 1
     if not config.TARGET_PROFILE_PATH.exists():
         _err("找不到 target_profile.yaml——规则初筛没有它就等于不过滤")
         return 1
@@ -242,13 +245,19 @@ def cmd_fetch(args: argparse.Namespace) -> int:
 
     new_jobs = [j for r in reports for j in r.new_jobs]
     failures = ingest.failing_sources(conn)
-    conn.close()
 
     if failures:
         print()
         _err(f"{len(failures)} 家最近一次抓取是失败的：")
         for f in failures:
             print(f"      {f['name']}（{f['source']}）：{(f['error'] or '')[:100]}")
+
+    if args.analyze and not args.dry_run:
+        try:
+            return _analyze_and_push(conn, args, failures)
+        finally:
+            conn.close()
+    conn.close()
 
     print()
     digest = notify.format_digest(new_jobs, failures)
@@ -263,6 +272,47 @@ def cmd_fetch(args: argparse.Namespace) -> int:
         print(digest)
         if not args.dry_run and notify.configured():
             print("\n（加 --notify 可以推到 Discord）")
+    return 0
+
+
+#: 推送给你的档位
+RECOMMENDED = ["strong_apply", "apply"]
+
+
+def _analyze_and_push(conn: Any, args: argparse.Namespace, failures: list[Any]) -> int:
+    """抓完之后：按 analyze_first 关键词排队分析一批，把新判为推荐投递的按推荐顺序推出去。
+
+    整条路不经过 agent：分析在第二层单次调用里做，排序复用 rank_jobs（档位优先，
+    同档有内推的在前，再按分数），推送文本只含结构化字段。
+    """
+    from . import analyze as analyze_mod
+    from .agent import MissingAPIKey
+    from .agent import tools as tools_mod
+
+    try:
+        results = analyze_mod.analyze_jobs(conn, limit=args.analyze)
+    except MissingAPIKey as exc:
+        _err(str(exc))
+        return 1
+    fresh = [r.job_id for r in results if r.verdict in RECOMMENDED]
+    ranked = tools_mod.rank_jobs(conn, verdicts=RECOMMENDED, job_ids=fresh, limit=100) if fresh else []
+
+    print()
+    _ok(f"分析 {len(results)} 个，新增推荐投递 {len(ranked)} 个")
+    text = notify.format_recommended(ranked, analyzed=len(results), failures=failures)
+    if not args.push_recommended:
+        if text:
+            print()
+            print(text)
+        return 0
+    if not text:
+        _ok("没有新增推荐，也没有抓取失败——不推送")
+        return 0
+    res = notify.send(text)
+    if not res.sent:
+        _err(f"推送失败：{res.detail}")
+        return 1
+    _ok("已推送到 Discord")
     return 0
 
 
@@ -292,7 +342,7 @@ def cmd_jobs_list(args: argparse.Namespace) -> int:
         "j.screen_tier, j.is_active, j.first_seen_at "
         "FROM jobs j LEFT JOIN companies c ON c.id = j.company_id "
     )
-    sql += "WHERE 1=1 " if args.all else "WHERE j.is_active = 1 "
+    sql += "WHERE 1=1 " if args.all else "WHERE j.is_active = 1 AND j.screened_out_at IS NULL "
     params: list[Any] = []
     if args.company:
         sql += "AND lower(c.name) = lower(?) "
@@ -572,7 +622,10 @@ def cmd_analyze(args: argparse.Namespace) -> int:
 
     conn = db.connect()
     db.init_db(conn)
-    pending = analyze_mod.pending_jobs(conn, limit=args.limit)
+    pending = analyze_mod.pending_jobs(
+        conn, limit=args.limit,
+        priority_terms=profile.load_target_profile().get("analyze_first") or (),
+    )
     if not pending:
         conn.close()
         _ok("没有需要分析的岗位（都分析过了）")
@@ -636,7 +689,8 @@ def cmd_tailor(args: argparse.Namespace) -> int:
     conn = db.connect()
     db.init_db(conn)
     try:
-        res = tailor_mod.tailor_resume(conn, args.job_id, max_pages=args.max_pages)
+        res = tailor_mod.tailor_resume(conn, args.job_id, max_pages=args.max_pages,
+                                       rewrite=not args.no_rewrite)
     except (MissingAPIKey, ValueError) as exc:
         conn.close()
         _err(str(exc))
@@ -660,6 +714,10 @@ def cmd_tailor(args: argparse.Namespace) -> int:
         )
     if res.dropped_for_length:
         _warn(f"为压页数砍掉 {len(res.dropped_for_length)} 条：{', '.join(res.dropped_for_length)}")
+    if res.rewrites:
+        _warn(f"{len(res.rewrites)} 条按 JD 关键词改写了措辞（diff 里 ✎ 那几行）——批准前逐条对照原文，确认意思没变")
+    if res.rewrite_rejected:
+        _warn(f"{len(res.rewrite_rejected)} 条改写没过校验，用了原文")
 
     if res.verify_ok:
         _ok("幻觉校验通过：产出物里没有母简历以外的数字或专名")
@@ -672,6 +730,13 @@ def cmd_tailor(args: argparse.Namespace) -> int:
         print(f"\n  PDF   {res.pdf_path}")
     if res.html_path:
         print(f"  HTML  {res.html_path}")
+
+    if not res.pdf_path:
+        # 不能只是少打一行 PDF——实测这样没人发现，没 PDF、没量页数的版本一路批准了
+        _err(f"没生成 PDF，页数也没量，这一版批准不了：{res.render_error or '原因不明'}")
+        print("      多半是这个终端里没装浏览器：./.venv/Scripts/python.exe -m playwright install chromium")
+        print("      装好后重新 agent tailor")
+        return 1
 
     print(f"\n这一版**还没过审核门**。看完 diff 和 PDF 之后：")
     print(f"  agent resume approve {res.resume_version_id}")
@@ -695,8 +760,13 @@ def cmd_resume_approve(args: argparse.Namespace) -> int:
 
     print(row.get("diff_summary") or "")
     print(f"\n  PDF {row.get('rendered_pdf_path') or '(无)'}  ·  {row.get('page_count')} 页")
-    tailor_mod.approve(conn, args.resume_version_id)
-    conn.close()
+    try:
+        tailor_mod.approve(conn, args.resume_version_id)
+    except ValueError as exc:
+        _err(str(exc))
+        return 1
+    finally:
+        conn.close()
     _ok(f"#{args.resume_version_id} 已批准，可以拿去投了")
     return 0
 
@@ -1304,6 +1374,7 @@ def build_parser() -> argparse.ArgumentParser:
     ta = sub.add_parser("tailor", help="为某个岗位定制简历（选材 + 渲染 + 幻觉校验）")
     ta.add_argument("job_id", type=int)
     ta.add_argument("--max-pages", type=int, default=1)
+    ta.add_argument("--no-rewrite", action="store_true", help="不按 JD 改写措辞，全部用母简历原文")
     ta.set_defaults(func=cmd_tailor)
 
     re_ = sub.add_parser("resume", help="简历版本与审核门")
@@ -1325,6 +1396,10 @@ def build_parser() -> argparse.ArgumentParser:
     fe.add_argument("--no-detail", action="store_true", help="跳过 JD 全文抓取（只看有哪些岗位）")
     fe.add_argument("--explain", action="store_true", help="显示初筛丢弃原因和样本，用来调过滤条件")
     fe.add_argument("--notify", action="store_true", help="把摘要推到 Discord")
+    fe.add_argument("--analyze", type=int, default=0, metavar="N",
+                    help="抓完后按 target_profile 的 analyze_first 排队，分析最多 N 个还没分析的岗位")
+    fe.add_argument("--push-recommended", action="store_true",
+                    help="把这次新判为推荐投递的岗位按推荐顺序推到 Discord（要和 --analyze 一起用）")
     fe.add_argument("--fast", action="store_true", help="取消请求间隔（只在自己调试时用）")
     fe.set_defaults(func=cmd_fetch)
 
@@ -1334,7 +1409,7 @@ def build_parser() -> argparse.ArgumentParser:
     jl.add_argument("--company")
     jl.add_argument("--tier", help="只看某一档，如 tier1_ai_engineer")
     jl.add_argument("--limit", type=int, default=40)
-    jl.add_argument("--all", action="store_true", help="包括已下架的")
+    jl.add_argument("--all", action="store_true", help="包括已下架的、以及不再通过初筛的")
     jl.set_defaults(func=cmd_jobs_list)
     js = josub.add_parser("show", help="看单个岗位和 JD 全文")
     js.add_argument("job_id", type=int)

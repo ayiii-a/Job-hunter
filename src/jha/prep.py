@@ -34,9 +34,11 @@ def build(conn: sqlite3.Connection, application_id: int) -> str:
     index = verify.bullet_index(master)
     analysis = analyze.get_analysis(conn, app["job_id"])
     selected: list[str] = []
+    rewrites: dict[str, str] = {}
     if app["resume_version_id"]:
         rv = tailor.get_version(conn, app["resume_version_id"])
         selected = (rv or {}).get("selected_bullet_ids") or []
+        rewrites = (rv or {}).get("rewrites") or {}
     contacts = conn.execute(
         "SELECT name, relationship, strength, last_contacted_at FROM contacts "
         "WHERE company_id = ? ORDER BY strength DESC", (app["company_id"],),
@@ -99,7 +101,7 @@ def build(conn: sqlite3.Connection, application_id: int) -> str:
     if selected:
         out.append(f"简历版本 #{app['resume_version_id']}。**面试官手里就是这几条，会逐条追问**：")
         out.append("")
-        out += [f"- `{i}` {index[i]['text']}" for i in selected if i in index]
+        out += [f"- `{i}` {rewrites.get(i) or index[i]['text']}" for i in selected if i in index]
     else:
         out.append("⚠ 这条投递没绑定简历版本——**你不知道对方手里那份写了什么**。"
                    "去翻当时的投递记录确认，别凭记忆去面试。")

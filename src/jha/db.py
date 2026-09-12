@@ -34,6 +34,8 @@ SCHEMA_VERSION = 4
 _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("jobs", "miss_count", "INTEGER NOT NULL DEFAULT 0"),
     ("jobs", "screen_tier", "TEXT"),
+    ("jobs", "screened_out_at", "TEXT"),
+    ("resume_versions", "rewrites_json", "TEXT NOT NULL DEFAULT '{}'"),
     ("emails", "message_id", "TEXT"),
     ("emails", "from_domain", "TEXT"),
     ("emails", "role_hint", "TEXT"),

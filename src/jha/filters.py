@@ -53,19 +53,44 @@ _US_STATE_CODES = (
     "NV NH NJ NM NY NC ND OH OK OR PA RI SC SD TN TX UT VT VA WA WV WI WY DC"
 ).split()
 
-#: 预设词表。在 target_profile 的 locations 里写 `preset:us` 就能引用。
+#: 预设词表。在 target_profile 的 locations / locations_exclude 里写 `preset:us` 就能引用。
 #:
 #: 州名缩写为什么要写成 ", CA" 而不是 "CA"：匹配是不区分大小写的词边界匹配，
 #: 裸的两字母缩写会撞上英文单词——`\bIN\b` 匹配 "in"、`\bOR\b` 匹配 "or"、
 #: `\bME\b` 匹配 "me"、`\bOK\b` 匹配 "ok"。加个逗号前缀锚在
 #: "City, ST" 这个真实写法上，就不会误伤。
+#:
+#: non_us 故意不收和美国地名撞车的词：Georgia（州）、Mexico（New Mexico）、
+#: Jersey（New Jersey）、Lebanon（新罕布什尔和宾州都有）。
 PRESETS: dict[str, tuple[str, ...]] = {
     "us": tuple(
         ["United States", "USA", "U.S.", "US-", "Remote - US", "Remote (US)"]
         + _US_STATE_NAMES
         + [f", {code}" for code in _US_STATE_CODES]
     ),
+    # ponytail: 只列了招聘量大的国家和地区，没列到的国家写成「Remote Xxx」仍会漏进来
+    "non_us": (
+        "Canada", "Mexico City", "Brazil", "Argentina", "Chile", "Colombia", "Costa Rica",
+        "United Kingdom", "UK", "England", "Scotland", "Ireland", "Germany", "France", "Spain",
+        "Portugal", "Netherlands", "Belgium", "Switzerland", "Austria", "Italy", "Poland",
+        "Czechia", "Czech Republic", "Romania", "Ukraine", "Sweden", "Norway", "Denmark",
+        "Finland", "Estonia", "Lithuania", "Latvia", "Serbia", "Croatia", "Greece", "Turkey",
+        "Israel", "United Arab Emirates", "UAE", "Dubai", "Saudi Arabia", "Egypt", "Nigeria",
+        "Kenya", "South Africa", "India", "Pakistan", "Bangladesh", "Sri Lanka", "Philippines",
+        "Vietnam", "Thailand", "Malaysia", "Indonesia", "Singapore", "China", "Hong Kong",
+        "Taiwan", "Japan", "Korea", "Australia", "New Zealand",
+        "Europe", "EMEA", "APAC", "LATAM", "Latin America", "South America", "Asia",
+        "Middle East", "Africa",
+    ),
 }
+
+#: AI 公司常用的通用职位名，不代表资深。里面的 "Staff" 不该触发标题排除——
+#: 实测 Perplexity 43 个、xAI 13 个这类岗位被整批挡掉，其中有
+#: "Member of Technical Staff (Machine Learning Engineer, Search)"。
+_GENERIC_TITLE = re.compile(r"\bmember of (the )?technical staff\b", re.IGNORECASE)
+
+#: 位置里明确写了美国。"US" 区分大小写，免得撞上英文单词 "us"
+_US_WORD = re.compile(r"\bUS\b")
 
 
 def expand_terms(terms: Sequence[str] | None) -> list[str]:
@@ -111,6 +136,19 @@ def _tier_of(title: str, tiers: dict[str, Sequence[str]]) -> tuple[str | None, s
     return None, None
 
 
+def _remote_abroad(loc: str) -> str | None:
+    """「Remote Spain」「Remote - EMEA」：写着 remote，限定的却是美国以外的地方。
+
+    locations 里的 Remote 和 remote_ok 都会把它放进来——实测 Affirm 的
+    「Remote Spain」就是这样进的库。同时写了美国的（「Remote (US or Canada)」）不算。
+    """
+    if not _pattern("remote").search(loc):
+        return None
+    if _US_WORD.search(loc) or _first_match(loc, PRESETS["us"]):
+        return None
+    return _first_match(loc, PRESETS["non_us"])
+
+
 def _location_ok(job: RawJob, target: dict[str, Any]) -> tuple[bool, str]:
     """地点判定：**逐个地点单独判**，不是把所有地点拼成一串判。
 
@@ -120,11 +158,14 @@ def _location_ok(job: RawJob, target: dict[str, Any]) -> tuple[bool, str]:
     实测 Ramp 的纽约岗位就是这样被整批误杀的。
 
     正确语义：**只要有一个地点可接受，这个岗位就可接受。**
+
+    remote_type 只说「这是远程岗」，不说在哪，所以只在没有任何具体地点时才算一个候选。
+    实测 28 个岗位靠它混进来（ElevenLabs 的 Germany + Remote、Sierra 的 Munich + Remote……），
+    全在美国以外，没有一个是美国岗位。
     """
-    candidates = [
-        loc.strip() for loc in (job.location, *job.all_locations, job.remote_type)
-        if loc and loc.strip()
-    ]
+    concrete = [loc.strip() for loc in (job.location, *job.all_locations) if loc and loc.strip()]
+    remote_type = (job.remote_type or "").strip()
+    candidates = concrete or ([remote_type] if remote_type else [])
     if not candidates:
         return False, "地点为空，无法判断"
 
@@ -134,7 +175,7 @@ def _location_ok(job: RawJob, target: dict[str, Any]) -> tuple[bool, str]:
 
     blocked: list[str] = []
     for loc in candidates:
-        bad = _first_match(loc, excludes)
+        bad = _first_match(loc, excludes) or _remote_abroad(loc)
         if bad:
             blocked.append(bad)
             continue
@@ -164,7 +205,7 @@ def screen(job: RawJob, target: dict[str, Any]) -> FilterResult:
         return FilterResult(False, "只要远程，此岗非远程")
 
     # ---- 第二道：标题排除 ------------------------------------------
-    bad = _first_match(title, expand_terms(target.get("titles_exclude")))
+    bad = _first_match(_GENERIC_TITLE.sub(" ", title), expand_terms(target.get("titles_exclude")))
     if bad:
         return FilterResult(False, f"标题排除：{bad}")
 

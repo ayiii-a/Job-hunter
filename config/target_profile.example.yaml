@@ -15,6 +15,7 @@ titles_include:
   - Platform Engineer
   - Infrastructure Engineer
   - Full Stack Engineer
+  - Member of Technical Staff   # AI 公司的通用职位名，不代表资深
 
 # --- 排除关键词：命中任意一条直接丢弃（优先于 include）---
 titles_exclude:
@@ -27,6 +28,11 @@ titles_exclude:
   - Recruiter
   - Principal          # 如果你还够不到，就排掉，省得每天看一堆投不了的
   - Staff              # 同上；够得到就删掉这行
+
+# --- 分析排队：标题命中这些词的岗位最先分析（agent fetch --analyze N 每次只分析 N 个）---
+analyze_first:
+  - AI Engineer
+  - Machine Learning
 
 # --- 地点：规则初筛的第一道闸 ---
 # 匹配方式是子串包含，所以写 "United States" 能顺带覆盖 "United States - Remote"

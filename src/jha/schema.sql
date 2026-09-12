@@ -67,6 +67,7 @@ CREATE TABLE IF NOT EXISTS jobs (
     source_updated_at TEXT,              -- Greenhouse 有 updated_at，可省掉全文抓取
     miss_count        INTEGER NOT NULL DEFAULT 0,   -- 连续几次抓取没出现；到 2 判下架
     screen_tier       TEXT,              -- 规则初筛命中的档位（title_tiers）
+    screened_out_at   TEXT,              -- 还挂在板子上但不再通过初筛（改过 target_profile 后）；NULL = 通过
     UNIQUE (source, external_id)
 );
 CREATE INDEX IF NOT EXISTS idx_jobs_company     ON jobs(company_id);
@@ -115,6 +116,7 @@ CREATE TABLE IF NOT EXISTS resume_versions (
     rendered_html_path   TEXT,
     page_count           INTEGER,        -- render-measure-retry 循环的结果
     diff_summary         TEXT,
+    rewrites_json        TEXT NOT NULL DEFAULT '{}',  -- 按 JD 改写过的 bullet：id → 改写后的正文（原文仍在母简历）
     approved_at          TEXT,           -- 你确认之后才填；未确认的不许投出去
     created_at           TEXT NOT NULL DEFAULT (datetime('now'))
 );

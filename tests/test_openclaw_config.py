@@ -68,7 +68,7 @@ def test_only_the_chat_agent_is_reachable_from_discord(bundle):
 
 def test_cron_jobs_are_isolated_light_and_announce_to_you(bundle):
     agent_jobs = [c for c in bundle.cron_commands if "--agent" in c]
-    assert len(agent_jobs) == 3
+    assert len(agent_jobs) == 2
     for c in agent_jobs:
         argv = shlex.split(c)
         assert argv[:3] == ["openclaw", "cron", "add"]

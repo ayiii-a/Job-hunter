@@ -49,9 +49,8 @@ schedules:
     max_turns: 8
     max_llm_calls: 20
     allow_notify: false        # 想让它自动推到 Discord 就改成 true
-    openclaw:
-      cron: "0 9 * * *"          # 每天 9:00
-      model: claude-sonnet-5
+    # 不交给外壳定时跑：抓取 → 分析 → 推送由确定性的 agent fetch --analyze N --push-recommended 做，
+    # 不经过 agent（频率见文件末尾的 jobs_detect_every）。这个任务留着手动跑，要一份带解释的简报时用
     notes: "Phase 1 + Phase 2 的日常驱动"
 
   # ---------------------------------------------------------------------
@@ -150,3 +149,5 @@ schedules:
 # -------------------------------------------------------------------------
 openclaw:
   mail_detect_every: 2h        # agent mail sweep --push-alerts 的频率
+  jobs_detect_every: 6h        # agent fetch --analyze N --push-recommended 的频率
+  jobs_analyze_per_run: 30     # 每次最多分析几个（Haiku 约 $0.01 / 个），按 target_profile 的 analyze_first 排队

@@ -11,7 +11,7 @@
 
     verify_selection   选中的 bullet id 必须真实存在        —— 选材路径（默认）
     verify_rendered    渲染出的文本里的数字/专名必须在母简历里 —— 最终闸门
-    verify_rewrite     改写后不得新增任何实体                —— 改写路径（默认关）
+    verify_rewrite     改写后不得新增任何实体                —— 改写路径（默认开，tailor --no-rewrite 关）
 
 第一道最强也最简单：ID 选材模式下，简历文本是**逐字从母简历取出来的**，
 所以「是不是原文」可以精确判定，不需要任何推断。

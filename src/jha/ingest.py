@@ -130,6 +130,11 @@ def fetch_company(
                 else:
                     report.updated += 1
 
+            # 还挂在板子上、但不再通过初筛的岗位：不下架（它确实还在招，下面的过期检测
+            # 故意比对全集），只做标记——分析队列、排序、推送和 jobs list 都跳过它。
+            # 改过 target_profile 之后，库里的旧岗位靠这一步跟上新规则
+            _mark_screened_out(conn, company, {j.external_id for j, _ in summary.dropped})
+
             # --- 4. 过期检测：比对接口返回的【全集】--------------------
             report.deactivated = _mark_missing(
                 conn, company, {j.external_id for j in listed}
@@ -238,7 +243,7 @@ def _upsert(
     conn.execute(
         "UPDATE jobs SET title=?, location=?, remote_type=?, url=?, "
         "jd_text=COALESCE(?, jd_text), salary_raw=?, posted_at=?, last_seen_at=?, "
-        "is_active=1, miss_count=0, content_hash=?, source_updated_at=?, screen_tier=? "
+        "is_active=1, miss_count=0, screened_out_at=NULL, content_hash=?, source_updated_at=?, screen_tier=? "
         "WHERE id=?",
         (
             job.title, location, job.remote_type, job.url, job.jd_text,
@@ -247,6 +252,18 @@ def _upsert(
         ),
     )
     return False
+
+
+def _mark_screened_out(
+    conn: sqlite3.Connection, company: sqlite3.Row, dropped_ids: set[str]
+) -> None:
+    rows = conn.execute(
+        "SELECT id, external_id FROM jobs WHERE company_id = ? AND screened_out_at IS NULL",
+        (company["id"],),
+    ).fetchall()
+    for row in rows:
+        if row["external_id"] in dropped_ids:
+            conn.execute("UPDATE jobs SET screened_out_at = datetime('now') WHERE id = ?", (row["id"],))
 
 
 def _mark_missing(

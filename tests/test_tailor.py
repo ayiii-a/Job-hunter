@@ -11,6 +11,7 @@
 """
 
 import json
+from pathlib import Path
 
 import pytest
 
@@ -83,8 +84,9 @@ def conn():
 def test_selection_schema_has_no_text_field():
     """模型只能给 id。它想输出 bullet 正文，schema 里没有地方放。"""
     props = tailor.SCHEMA["properties"]
-    assert set(props) == {"selected_bullet_ids", "skills_line", "rationale"}
+    assert set(props) == {"selected_bullet_ids", "backup_bullet_ids", "skills_line", "rationale"}
     assert props["selected_bullet_ids"]["items"] == {"type": "string"}
+    assert props["backup_bullet_ids"]["items"] == {"type": "string"}
     # rationale 是给人看的，明确说明不会进简历
     assert "不会进简历" in props["rationale"]["description"]
 
@@ -225,17 +227,18 @@ def test_page_count_comes_from_the_pdf_not_a_guess():
 
 
 def test_render_shrinks_until_it_fits(tmp_path):
+    # 用项目：经历每段最多砍一条，40 条压不下来
     fat = {
         **MASTER,
-        "experiences": [{
-            "id": "e", "company": "Acme", "title": "Engineer", "period": "2020",
+        "experiences": [],
+        "projects": [{
+            "id": "e", "name": "Acme", "period": "2020",
             "bullets": [
                 {"id": f"x{i}", "text": "Lorem ipsum dolor sit amet consectetur. " * 12,
                  "metrics": False}
                 for i in range(40)
             ],
         }],
-        "projects": [],
     }
     res = render.render_resume(fat, [f"x{i}" for i in range(40)],
                                max_pages=1, out_dir=tmp_path, basename="fat")
@@ -293,6 +296,53 @@ def test_approve_sets_the_timestamp(conn, monkeypatch, tmp_path):
     res = tailor.tailor_resume(conn, 1, client=client, budget=Budget())
     tailor.approve(conn, res.resume_version_id)
     assert tailor.get_version(conn, res.resume_version_id)["approved_at"]
+
+
+def _no_browser(monkeypatch):
+    def unavailable(self):
+        raise render.RenderUnavailable("启动 Chromium 失败：Executable doesn't exist\n╔══ playwright install ══╗")
+    monkeypatch.setattr(render.PdfRenderer, "__enter__", unavailable)
+
+
+def _tailor(conn, monkeypatch, tmp_path, ids):
+    monkeypatch.setattr(tailor.profile, "load_master_profile", lambda: MASTER)
+    monkeypatch.setattr(tailor.config, "DATA_DIR", tmp_path)
+    client = FakeSelector({"selected_bullet_ids": ids, "rationale": "x"})
+    return tailor.tailor_resume(conn, 1, client=client, budget=Budget())
+
+
+def test_missing_browser_is_reported_not_swallowed(conn, monkeypatch, tmp_path):
+    """实测：原因被吞掉，没 PDF、没量页数的版本一路走到了「已批准」。"""
+    _no_browser(monkeypatch)
+    res = _tailor(conn, monkeypatch, tmp_path, ["b1"])
+    assert res.pdf_path is None and res.html_path
+    assert res.render_error == "启动 Chromium 失败：Executable doesn't exist"
+    assert res.compact()["render_error"] == res.render_error
+
+
+def test_approve_refuses_a_version_without_a_pdf(conn, monkeypatch, tmp_path):
+    _no_browser(monkeypatch)
+    res = _tailor(conn, monkeypatch, tmp_path, ["b1"])
+    with pytest.raises(ValueError, match="没有 PDF"):
+        tailor.approve(conn, res.resume_version_id)
+    assert tailor.get_version(conn, res.resume_version_id)["approved_at"] is None
+
+
+def test_approve_refuses_when_the_pdf_file_is_gone(conn, monkeypatch, tmp_path):
+    res = _tailor(conn, monkeypatch, tmp_path, ["b1"])
+    Path(res.pdf_path).unlink()
+    with pytest.raises(ValueError, match="不存在"):
+        tailor.approve(conn, res.resume_version_id)
+
+
+def test_versions_of_the_same_job_do_not_overwrite_each_other(conn, monkeypatch, tmp_path):
+    one = _tailor(conn, monkeypatch, tmp_path, ["b1"])
+    two = _tailor(conn, monkeypatch, tmp_path, ["b3"])
+    assert one.pdf_path != two.pdf_path
+    assert Path(one.pdf_path).is_file() and Path(two.pdf_path).is_file()
+    assert Path(one.pdf_path).parent.name == f"v{one.resume_version_id}"
+    assert Path(one.pdf_path).name == Path(two.pdf_path).name, "文件名招聘方看得到，不带版本号"
+    assert tailor.get_version(conn, one.resume_version_id)["rendered_pdf_path"] == one.pdf_path
 
 
 def test_compact_has_no_bullet_text(conn, monkeypatch, tmp_path):

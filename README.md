@@ -99,7 +99,7 @@ cp .env.example .env
 | `agent spend` | 按用途和任务拆 LLM 成本，含权限毕业计数 |
 | `agent analyze` | 直接跑 JD 分析（第二层，不经过 agent loop） |
 | `agent runs` | 看 agent 干过什么；`--show <id>` 展开完整轨迹 |
-| `agent tailor <job_id>` | 为某个岗位定制简历（选材 + 渲染 + 幻觉校验） |
+| `agent tailor <job_id>` | 为某个岗位定制简历（选材 + 按 JD 关键词改写 + 渲染 + 幻觉校验；`--no-rewrite` 只选材） |
 | `agent resume list` | 列出简历版本；`approve <id>` 过审核门 |
 | `agent schedules` | 列出定时任务；`run --schedule <名字>` 跑一个 |
 | `agent applied <job_id>` | 记录一次**你已手动投完**的投递 |
@@ -111,6 +111,7 @@ cp .env.example .env
 | `agent mail queue` | 人工确认队列；`accept` / `dismiss` / `show <id>` |
 | `agent prep <application_id>` | 面试准备材料 |
 | `agent mail sweep --push-alerts` | 给定时任务用：有面试邀请 / OA / offer 就推到 Discord（确定性，不经过模型） |
+| `agent fetch --analyze N --push-recommended` | 给定时任务用：抓取 → 按关键词排队分析最多 N 个 → 新增推荐投递按推荐顺序推到 Discord |
 | `agent openclaw config` | 从 `schedules.yaml` 生成 OpenClaw 配置片段、cron 命令和 AGENTS.md |
 | `agent openclaw verify <path>` | 检查 OpenClaw 配置有没有被改松 |
 
@@ -299,6 +300,8 @@ JD 里藏的指令说服了它也无处可施。
 `accept` 刻意不是 agent 的工具。邮件正文——连主题行——都不进 agent 的上下文。
 
 **面试邀请的即时提醒不经过模型。** `agent mail sweep --push-alerts` 由定时任务每 1–2 小时跑一次（OpenClaw 的 command 作业，或者 Windows 任务计划），推送只含公司、岗位、类型和邮件 id；推送失败时退出码非零。每次检测都在 `fetch_runs` 留一行，超过 6 小时没有成功的检测，`get_fetch_health` 和每日总结会报「已过期」——检测静默停掉时，你看到的只会是「最近没有面试邀请」。
+
+**新岗位推荐也不经过 agent。** `agent fetch --analyze 30 --push-recommended` 抓取之后，按 `target_profile` 的 `analyze_first`（New Grad、Early Career……）排队分析最多 30 个还没分析的岗位，把新判为推荐投递的按推荐顺序推到 Discord：强烈推荐在前，同档有内推的在前，再按分数。推送只含公司、岗位、地点、薪资、链接和分数——分析器写的 gap 是读 JD 生成的，不进推送。分析过的岗位不会再排队，所以不会重复推。还挂在板子上、但改规则后不再通过初筛的旧岗位会被标记，分析、排序、推送都跳过它。
 
 ### 定时任务：行为住在文件里
 

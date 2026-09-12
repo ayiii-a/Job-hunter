@@ -478,12 +478,14 @@ def get_analysis(conn: sqlite3.Connection, job_id: int) -> dict:
 @tool(
     "rank_jobs",
     "把已分析的岗位按匹配档位和分数排序，附带该公司有没有内推线索。"
-    "档位相同的，有内推路径的排前面。",
+    "档位相同的，有内推路径的排前面。传 job_ids 就只排这几个。",
     Permission.READ,
-    _obj({"verdicts": {"type": "array", "items": STR}, "limit": INT}),
+    _obj({"verdicts": {"type": "array", "items": STR}, "job_ids": {"type": "array", "items": INT},
+          "limit": INT}),
 )
 def rank_jobs(
-    conn: sqlite3.Connection, verdicts: list[str] | None = None, limit: int = 25
+    conn: sqlite3.Connection, verdicts: list[str] | None = None, limit: int = 25,
+    job_ids: list[int] | None = None,
 ) -> list[dict]:
     order = {"strong_apply": 0, "apply": 1, "stretch": 2, "skip": 3}
     wanted = verdicts or ["strong_apply", "apply", "stretch"]
@@ -492,13 +494,13 @@ def rank_jobs(
         "j.location, j.salary_raw, j.url, c.name AS company, c.id AS cid "
         "FROM job_analysis a JOIN jobs j ON j.id = a.job_id "
         "LEFT JOIN companies c ON c.id = j.company_id "
-        "WHERE j.is_active = 1 AND a.scorer_version = ?",
+        "WHERE j.is_active = 1 AND j.screened_out_at IS NULL AND a.scorer_version = ?",
         (analyze.ANALYZER_VERSION,),
     ).fetchall()
 
     out = []
     for r in rows:
-        if r["verdict"] not in wanted:
+        if r["verdict"] not in wanted or (job_ids is not None and r["job_id"] not in job_ids):
             continue
         contacts = [
             dict(x) for x in conn.execute(
@@ -521,7 +523,8 @@ def rank_jobs(
 
 @tool(
     "tailor_resume",
-    "为某个岗位定制一份简历：从母简历按 bullet id 选材、渲染 PDF、量页数、跑幻觉校验。"
+    "为某个岗位定制一份简历：从母简历按 bullet id 选材、按 JD 关键词改写措辞（逐条过确定性校验）、"
+    "渲染 PDF、量页数、跑幻觉校验。"
     "生成的版本**未经审核**，必须由人看过 diff 后在 CLI 里批准才能投出去。",
     Permission.WRITE,
     _obj({"job_id": INT, "max_pages": INT}, ["job_id"]),
