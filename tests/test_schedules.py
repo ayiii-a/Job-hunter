@@ -190,7 +190,7 @@ def test_phone_query_is_read_only():
     data = profile.load_yaml(config.CONFIG_DIR / "schedules.example.yaml")
     s = schedules._parse_one("phone-query", data["schedules"]["phone-query"])
     assert s.tools and all(tools_mod.REGISTRY[t].permission is Permission.READ for t in s.tools)
-    assert s.openclaw.get("chat") == "telegram"
+    assert s.openclaw.get("chat") == "discord"
 
 
 def test_email_sweep_does_not_push_through_the_agent():
@@ -209,9 +209,9 @@ def test_email_sweep_does_not_push_through_the_agent():
 
 @pytest.mark.parametrize("block, match", [
     ("openclaw:\n      model: claude-haiku-4-5", "二选一"),
-    ("openclaw:\n      cron: '0 9 * * *'\n      chat: telegram\n      model: claude-haiku-4-5", "二选一"),
+    ("openclaw:\n      cron: '0 9 * * *'\n      chat: discord\n      model: claude-haiku-4-5", "二选一"),
     ("openclaw:\n      cron: '0 9 * *'\n      model: claude-haiku-4-5", "五段"),
-    ("openclaw:\n      chat: slack\n      model: claude-haiku-4-5", "telegram"),
+    ("openclaw:\n      chat: slack\n      model: claude-haiku-4-5", "discord"),
     ("openclaw:\n      cron: '0 9 * * *'", "model"),
     ("openclaw:\n      cron: '0 9 * * *'\n      model: gpt-9", "PRICING"),
     ("openclaw:\n      cron: '0 9 * * *'\n      model: claude-haiku-4-5\n      tools: [exec]", "不认识"),

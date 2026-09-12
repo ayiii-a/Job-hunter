@@ -171,11 +171,11 @@ def test_gated_tool_runs_when_approved(conn, monkeypatch):
     sent = {}
     monkeypatch.setattr(
         tools_mod.notify, "send",
-        lambda text: SimpleNamespace(sent=True, channel="telegram", detail="") or sent.setdefault("t", text),
+        lambda text: SimpleNamespace(sent=True, channel="discord", detail="") or sent.setdefault("t", text),
     )
     monkeypatch.setattr(
         tools_mod.notify, "send",
-        lambda text: (sent.setdefault("t", text), SimpleNamespace(sent=True, channel="telegram", detail=""))[1],
+        lambda text: (sent.setdefault("t", text), SimpleNamespace(sent=True, channel="discord", detail=""))[1],
     )
     client = FakeClient([
         [tool_block("send_notification", {"text": "hi"})],

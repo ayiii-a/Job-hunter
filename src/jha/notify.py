@@ -1,4 +1,8 @@
-"""通知。Telegram 优先，没配就退回控制台。
+"""通知。推到 Discord 频道（webhook），没配就退回控制台。
+
+用 webhook 不用 bot：webhook 只能往一个频道发消息，读不了、也管不了别的——
+推送要的就这么多，权限给到这里为止。OpenClaw 的聊天入口另用一个 bot，两边互不依赖：
+外壳挂了，面试邀请照样推得出来。
 
 设计上通知**永远不能让抓取失败**：推送挂了顶多是你少看一条消息，
 而抓取结果已经落库了。所以这里所有异常都吞掉、只回报状态。
@@ -13,8 +17,8 @@ import httpx
 
 from . import config
 
-API = "https://api.telegram.org"
-MAX_LEN = 3900          # Telegram 单条上限 4096，留点余量
+MAX_LEN = 2000              # Discord 单条上限
+SUPPRESS_EMBEDS = 1 << 2    # 不展开链接预览
 
 
 @dataclass
@@ -25,29 +29,54 @@ class NotifyResult:
 
 
 def configured() -> bool:
-    return bool(config.env("TELEGRAM_BOT_TOKEN") and config.env("TELEGRAM_CHAT_ID"))
+    return bool(config.env("DISCORD_WEBHOOK_URL"))
+
+
+def chunks(text: str, size: int = MAX_LEN) -> list[str]:
+    """按行切成不超过 size 的段。
+
+    岗位摘要经常超过 2000 字。直接截断会静默丢掉后面的岗位——丢的正好是你没看到的那些。
+    """
+    out: list[str] = []
+    cur = ""
+    for line in text.splitlines():
+        line = line[:size]  # ponytail: 单行超过 2000 字直接截断，摘要里不会出现这么长的行
+        if cur and len(cur) + 1 + len(line) > size:
+            out.append(cur)
+            cur = line
+        else:
+            cur = f"{cur}\n{line}" if cur else line
+    if cur:
+        out.append(cur)
+    return out
 
 
 def send(text: str) -> NotifyResult:
-    if not configured():
-        return NotifyResult(False, "none", "没配 TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID")
-    token = config.env("TELEGRAM_BOT_TOKEN")
-    chat_id = config.env("TELEGRAM_CHAT_ID")
+    url = config.env("DISCORD_WEBHOOK_URL")
+    if not url:
+        return NotifyResult(False, "none", "没配 DISCORD_WEBHOOK_URL")
+    parts = chunks(text)
+    if not parts:
+        return NotifyResult(False, "discord", "空消息，没发")
     try:
-        r = httpx.post(
-            f"{API}/bot{token}/sendMessage",
-            json={
-                "chat_id": chat_id,
-                "text": text[:MAX_LEN],
-                "disable_web_page_preview": True,
-            },
-            timeout=20.0,
-        )
-        if r.status_code != 200:
-            return NotifyResult(False, "telegram", f"HTTP {r.status_code}: {r.text[:120]}")
-        return NotifyResult(True, "telegram")
+        for part in parts:
+            r = httpx.post(
+                url,
+                json={
+                    "content": part,
+                    "flags": SUPPRESS_EMBEDS,
+                    # 推送文本里可能有 JD、邮件派生出来的字。@everyone 不许真的去 @ 人
+                    "allowed_mentions": {"parse": []},
+                },
+                timeout=20.0,
+            )
+            if r.status_code not in (200, 204):
+                return NotifyResult(False, "discord", f"HTTP {r.status_code}: {r.text[:120]}")
+        return NotifyResult(True, "discord")
     except httpx.HTTPError as exc:
-        return NotifyResult(False, "telegram", f"{type(exc).__name__}: {exc}")
+        # 只报异常类型：异常信息里可能带着 webhook URL，而 URL 本身就是密钥——
+        # 这条 detail 会经 send_notification 回到模型的上下文里
+        return NotifyResult(False, "discord", type(exc).__name__)
 
 
 # ---------------------------------------------------------------------------

@@ -53,7 +53,7 @@
 | 简历渲染 | HTML → PDF（Playwright `page.pdf()`） | Typst、LaTeX | Playwright 本来就是依赖，不必多装一条工具链；且 diff 预览天然就是 HTML，一套模板同时解决渲染和预览 |
 | 邮件 | **IMAP + App Password** | Gmail API | `gmail.readonly` 是 restricted scope，个人项目只能停在 Testing 模式 → **refresh token 每 7 天过期**，邮件模块会每周静默停摆。IMAP 无此问题；"只读"由代码层面不实现写路径来保证（见 Phase 5） |
 | 浏览器自动化 | Playwright（persistent context 复用登录态） | Chrome 插件 | 预填表单用；不要让 agent 保存密码 |
-| 通知 | Telegram Bot / Slack webhook | 邮件 | 面试邀请需要即时推送 |
+| 通知 | Discord：推送用频道 webhook，聊天入口用 bot | 邮件 | 面试邀请需要即时推送 |
 | 前端/视图 | 先 CLI + Google Sheet 同步 | Streamlit / 简单 Web | 第一版不要写前端，Sheet 就是 tracking 表 |
 | 架构 | **Agent loop + tool use** | 确定性管线 | 模型决定「做什么」，Phase 0/1 的确定性代码决定「怎么做」。安全属性靠**工具注册表**保证——不存在的工具调不出来 |
 | 平台 | Windows（本机） | — | Python 在 Windows 上默认编码是 **cp1252**，所有 `open()` 必须显式 `encoding='utf-8'`，入口设 `PYTHONIOENCODING=utf-8`。JD 文本含大量非 ASCII（实测有日文标题、smart quotes、em-dash） |
@@ -332,7 +332,7 @@ applied → oa → phone_screen → interview_loop → onsite → offer
    - 实测：**Databricks 一家公司就有 870 个在招岗位、178 个不同地点**，只有约三分之一在美国（岗位数前 12 的地点里有 Bengaluru、London、Tokyo、Amsterdam、Singapore）。
    - 80 家目标公司很可能意味着 **5,000–15,000 个开放岗位**。没有这道过滤，Phase 2 第一天就会破产（成本和噪音双爆）。
    - **第一道必须是地点/语言**，然后才是标题关键词 / 排除词 / 职级。全部不过 LLM。
-8. 调度：每天 2–4 次；新岗位汇总推送到 Telegram。**推送时带上该公司的 `contacts`**——认识人就先要内推。
+8. 调度：每天 2–4 次；新岗位汇总推送到 Discord。**推送时带上该公司的 `contacts`**——认识人就先要内推。
 9. **失败告警从第一天就要有**，不要等 Phase 7。抓取器静默失败是最危险的失败模式：你会以为"最近没什么新岗位"，实际是适配器挂了两周。
 
 **决策点**
@@ -854,7 +854,7 @@ OpenClaw Gateway（WSL2，systemd 用户服务）
  ├─ cron jha-email-sweep   每天 21:00    isolated + light-context，claude-haiku-4-5
  ├─ cron jha-daily-jobs    每天 9:00     isolated + light-context，claude-sonnet-5
  ├─ cron jha-weekly-review 每周日 10:00  isolated + light-context，claude-sonnet-5
- ├─ jha-phone-query：绑定 Telegram 私聊，只读
+ ├─ jha-phone-query：绑定 Discord 私信，只读
  └─ 每个 agent 的 mcpServers → python -m jha.mcp_server --schedule <任务名>
 
 我们的 Python（Windows 原生，不变）：工具注册表、第二层、agent_runs / agent_steps、agent run
@@ -875,7 +875,7 @@ OpenClaw Gateway（WSL2，systemd 用户服务）
    agent 只做每天一次的总结。agent 降频不会拖慢提醒。
 
 **verify 有牙齿。** `agent openclaw verify` 检查：gateway 只绑 loopback、每个 jha agent 有白名单且只含该任务的工具、
-沙箱 all、heartbeat 关闭、MCP 服务器服务的是对应任务、Telegram 私聊只允许你本人、定时任务的 agent 不能从聊天触发、
+沙箱 all、heartbeat 关闭、MCP 服务器服务的是对应任务、Discord 私信只允许你本人、定时任务的 agent 不能从聊天触发、
 gateway 上没有别的 agent。找不到该有的键就算问题。每一种改松方式都有一条会失败的测试（`tests/test_openclaw_config.py`）。
 
 **又一个沉默失败。** 邮件检测停掉时（外壳挂了、电脑睡着、应用专用密码被撤），你看到的只是「最近没有面试邀请」。
@@ -885,10 +885,10 @@ gateway 上没有别的 agent。找不到该有的键就算问题。每一种改
 **还没做 / 还不知道的**
 
 - **Spike 还没做**：MCP 能不能从 WSL 拉起 Windows 的 python、白名单是否真的只把这几个工具发给模型、单次 run 的真实 token 数、WSL 保活、睡眠唤醒后 cron 补不补跑。前三项任何一项不成立就退回 Windows 任务计划
-- **配置键名按 2026-09 的文档写**，装好后用 `openclaw config schema` 核对
+- **配置键名按 2026-09 的文档写**，装好后用 `openclaw config schema` 核对。Discord 这块文档最不全：`channels.discord` 的键名和私信 binding 的 peer id 格式是推断的
 - **记账缺口**：OpenClaw 自己的模型费用不经过 `Budget`，这些 run 在 `agent runs` 里 `model` 是 openclaw、成本为 0
 - **配置文件查不到的**：没装 ClawHub 上的 skill、版本已固定——只能你自己确认
-- **平台本身的风险仍在**：CVE-2026-25253、ClawJacked、ClawHub 恶意 skill。缓解：不装第三方 skill、固定版本、gateway 只绑 loopback、Telegram 只认你、沙箱 all
+- **平台本身的风险仍在**：CVE-2026-25253、ClawJacked、ClawHub 恶意 skill。缓解：不装第三方 skill、固定版本、gateway 只绑 loopback、Discord 只认你、沙箱 all
 
 ---
 
@@ -903,7 +903,7 @@ gateway 上没有别的 agent。找不到该有的键就算问题。每一种改
 | 5 | 真相源 | 数据库；Sheet 只读视图 | 不建议改 |
 | 6 | LinkedIn/Indeed | 不抓、不 Easy Apply | 不建议改 |
 | 7 | 匹配判定方式 | 规则硬性项 + LLM **分类档位**（不用 0–100 阈值） | 有 100+ 标注样本后可加模型 |
-| 8 | 前端 | 先 CLI + Sheet + Telegram | 数据量上来后再做 dashboard |
+| 8 | 前端 | 先 CLI + Sheet + Discord | 数据量上来后再做 dashboard |
 | 9 | 邮件接入 | **IMAP + App Password**，不用 Gmail API | Google 放宽 restricted scope 政策后 |
 | 10 | 简历渲染 | **HTML → Playwright PDF**，不用 Typst | 不建议改（diff 预览本来也要 HTML） |
 | 11 | `applications.status` | **物化缓存**；`events` 是唯一真相源 | 不建议改 |
@@ -921,6 +921,7 @@ gateway 上没有别的 agent。找不到该有的键就算问题。每一种改
 | 23 | 面试邀请即时提醒 | **确定性推送**，不经过模型；agent 只做每日总结 | 不建议改 |
 | 24 | 手机上能不能确认面试邀请 | **不能**，只读查询；确认回电脑上做 | 真需要时再做绕过模型的确定性命令 |
 | 25 | 外壳部署在哪 | **本机 WSL2**，不上 VPS | VPS 等于放弃「数据本地」 |
+| 26 | 推送与聊天渠道 | **Discord**：推送用频道 webhook（只能发、读不了），聊天入口用 OpenClaw 的 bot | 不建议改——两者互不依赖，外壳挂了推送照样发 |
 
 ---
 
@@ -970,7 +971,7 @@ gateway 上没有别的 agent。找不到该有的键就算问题。每一种改
 
 1. **母简历投入的时间决定上限**。agent 再聪明也只能重组你给它的材料。所以别把它压进 3 天——它值 1–2 周。
 2. **每个阶段结束就开始真用**，用真实反馈驱动下一阶段，而不是把六个阶段全做完再上线。
-3. **把"agent 判断 + 你确认"做成默认交互模式**，通过 Telegram 回复一个字就能确认，摩擦足够低就不会想跳过审核。
+3. **把"agent 判断 + 你确认"做成默认交互模式**，确认只要一条命令（`agent mail accept <id>`），摩擦足够低就不会想跳过审核。
 4. **记录一切**（events 表、LLM 输入输出、投递材料版本），求职是长周期活动，两个月后你一定会需要回看。
 5. **工具做到够用就停**。真正提高 offer 率的是投得准、准备得深，不是 agent 功能多。给这条一个可执行的闸门，别只当口号——见风险表最后一行。
 6. **优先走内推**。这份文档里所有工程加起来，对 offer 率的影响可能都不如"在目标公司找到一个愿意推你的人"。**工具是用来腾出时间去做这件事的，不是用来替代它的。** 如果某周你在写 agent 上花的时间超过了在找人聊天上花的时间，你大概率跑偏了。

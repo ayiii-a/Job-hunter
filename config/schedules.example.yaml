@@ -48,7 +48,7 @@ schedules:
       - send_notification
     max_turns: 8
     max_llm_calls: 20
-    allow_notify: false        # 想让它自动推到 Telegram 就改成 true
+    allow_notify: false        # 想让它自动推到 Discord 就改成 true
     openclaw:
       cron: "0 9 * * *"          # 每天 9:00
       model: claude-sonnet-5
@@ -112,7 +112,7 @@ schedules:
   # ---------------------------------------------------------------------
   phone-query:
     task: |
-      你在 Telegram 里回答我关于求职进度的问题，只看不改。
+      你在 Discord 私信里回答我关于求职进度的问题，只看不改。
 
       - 回答要短，手机上看得完：先给结论，再给数字
       - 提到投递或邮件时带上 id，方便我回电脑上处理
@@ -130,7 +130,7 @@ schedules:
     max_turns: 4
     max_llm_calls: 6
     openclaw:
-      chat: telegram
+      chat: discord
       model: claude-haiku-4-5
     notes: "OpenClaw 聊天入口，不进 cron。只读"
 
@@ -141,7 +141,7 @@ schedules:
 #
 # 每个任务里的 openclaw 块决定外壳怎么调度它：
 #   cron   五段 cron 表达式。用 isolated 会话 + light-context 跑，结果推给你
-#   chat   绑定到聊天入口（目前只支持 telegram），你发消息时才跑
+#   chat   绑定到聊天入口（目前只支持 discord），你发消息时才跑
 #   model  外壳用哪个模型跑这个 agent，必须是 PRICING 里有的
 # 没有 openclaw 块的任务不会出现在外壳里。
 #

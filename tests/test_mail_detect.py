@@ -155,7 +155,7 @@ def cli_env(tmp_path, monkeypatch):
 
     def fake_send(text, ok=True):
         sent.append(text)
-        return notify.NotifyResult(True, "telegram")
+        return notify.NotifyResult(True, "discord")
 
     monkeypatch.setattr(notify, "send", fake_send)
     return dbfile, sent
@@ -175,7 +175,7 @@ def test_cli_push_alerts_sends_only_db_fields(cli_env):
 
 def test_cli_push_failure_is_loud(cli_env, monkeypatch):
     """推送失败时退出码非零——定时任务的「没收到面试提醒」不能是沉默的。"""
-    monkeypatch.setattr(notify, "send", lambda text: notify.NotifyResult(False, "none", "没配 TELEGRAM_BOT_TOKEN"))
+    monkeypatch.setattr(notify, "send", lambda text: notify.NotifyResult(False, "none", "没配 DISCORD_WEBHOOK_URL"))
     assert cli.main(["mail", "sweep", "--push-alerts"]) == 1
 
 

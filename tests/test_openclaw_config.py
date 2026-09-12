@@ -14,7 +14,7 @@ import pytest
 from jha import config, openclaw, profile, schedules
 from jha.mcp_server import exposed_tools
 
-TG = 123456789
+UID = "123456789012345678"
 
 
 def shipped():
@@ -28,7 +28,7 @@ def settings():
 
 @pytest.fixture
 def bundle():
-    return openclaw.generate(shipped(), settings=settings(), telegram_id=str(TG))
+    return openclaw.generate(shipped(), settings=settings(), discord_id=UID)
 
 
 @pytest.fixture
@@ -37,7 +37,7 @@ def cfg(bundle):
 
 
 def problems(cfg):
-    return openclaw.verify(cfg, shipped(), telegram_id=str(TG))
+    return openclaw.verify(cfg, shipped(), discord_id=UID)
 
 
 # ---------------------------------------------------------------------------
@@ -62,7 +62,7 @@ def test_every_shell_agent_gets_exactly_its_schedule_tools(bundle):
             "-m", "jha.mcp_server", "--schedule", name]
 
 
-def test_only_the_chat_agent_is_reachable_from_telegram(bundle):
+def test_only_the_chat_agent_is_reachable_from_discord(bundle):
     assert {b["agentId"] for b in bundle.config["bindings"]} == {"jha-phone-query"}
 
 
@@ -75,7 +75,7 @@ def test_cron_jobs_are_isolated_light_and_announce_to_you(bundle):
         assert argv[argv.index("--session") + 1] == "isolated"
         assert "--light-context" in argv and "--announce" in argv
         assert argv[argv.index("--model") + 1].startswith("anthropic/claude-")
-        assert argv[argv.index("--to") + 1] == str(TG)
+        assert argv[argv.index("--to") + 1] == f"user:{UID}"
 
 
 def test_mail_detect_is_a_command_job_not_an_agent(bundle):
@@ -99,25 +99,25 @@ def test_wsl_path():
     assert openclaw.wsl_path(p) == "/mnt/c/Projects/Job Hunting Agent/.venv/Scripts/python.exe"
 
 
-def test_missing_telegram_id_is_loud():
-    b = openclaw.generate(shipped(), settings=settings(), telegram_id=None)
+def test_missing_discord_id_is_loud():
+    b = openclaw.generate(shipped(), settings=settings(), discord_id=None)
     assert b.warnings
-    assert any("allowFrom" in p for p in openclaw.verify(b.config, shipped(), telegram_id=None))
+    assert any("allowFrom" in p for p in openclaw.verify(b.config, shipped(), discord_id=None))
 
 
-def test_group_chat_id_is_refused():
+def test_malformed_user_id_is_refused():
     with pytest.raises(openclaw.ShellConfigError, match="数字"):
-        openclaw.generate(shipped(), settings=settings(), telegram_id="-100123")
+        openclaw.generate(shipped(), settings=settings(), discord_id="@zijiang")
 
 
 def test_two_chat_entries_are_refused():
     s = shipped()
     s["phone-2"] = schedules._parse_one("phone-2", {
         "task": "t", "tools": ["list_jobs"],
-        "openclaw": {"chat": "telegram", "model": "claude-haiku-4-5"},
+        "openclaw": {"chat": "discord", "model": "claude-haiku-4-5"},
     })
     with pytest.raises(openclaw.ShellConfigError, match="聊天入口"):
-        openclaw.generate(s, settings=settings(), telegram_id=str(TG))
+        openclaw.generate(s, settings=settings(), discord_id=UID)
 
 
 def test_write_bundle(tmp_path, bundle):
@@ -154,17 +154,18 @@ LOOSENINGS = {
     "沙箱不是 all": lambda c: _agent(c)["sandbox"].__setitem__("mode", "non-main"),
     "heartbeat 打开": lambda c: _agent(c)["heartbeat"].__setitem__("every", "30m"),
     "gateway 对外": lambda c: c["gateway"].__setitem__("bind", "lan"),
-    "陌生人能私聊": lambda c: c["channels"]["telegram"].__setitem__("dmPolicy", "open"),
-    "allowFrom 多了人": lambda c: c["channels"]["telegram"]["allowFrom"].append(987654321),
-    "群聊放开": lambda c: c["channels"]["telegram"].__setitem__("groupAllowFrom", [-100123]),
-    "账号级 dmPolicy 盖掉 allowlist": lambda c: c["channels"]["telegram"].__setitem__(
+    "陌生人能私聊": lambda c: c["channels"]["discord"].__setitem__("dmPolicy", "open"),
+    "allowFrom 多了人": lambda c: c["channels"]["discord"]["allowFrom"].append("987654321098765432"),
+    "id 写成了数字": lambda c: c["channels"]["discord"].__setitem__("allowFrom", [int(UID)]),
+    "服务器放开": lambda c: c["channels"]["discord"].__setitem__("guilds", {"111111111111111111": {}}),
+    "账号级 dmPolicy 盖掉 allowlist": lambda c: c["channels"]["discord"].__setitem__(
         "accounts", {"default": {"dmPolicy": "pairing"}}),
     "多了一个带 exec 的 agent": lambda c: c["agents"]["entries"].__setitem__(
         "main", {"tools": {"allow": ["exec"]}}),
-    "Telegram 路由给了定时任务的 agent": lambda c: c["bindings"].append(
-        {"agentId": "jha-daily-jobs", "match": {"channel": "telegram"}}),
-    "Telegram 路由给了别的 agent": lambda c: c["bindings"].append(
-        {"agentId": "main", "match": {"channel": "telegram"}}),
+    "Discord 路由给了定时任务的 agent": lambda c: c["bindings"].append(
+        {"agentId": "jha-daily-jobs", "match": {"channel": "discord"}}),
+    "Discord 路由给了别的 agent": lambda c: c["bindings"].append(
+        {"agentId": "main", "match": {"channel": "discord"}}),
     "MCP 服务器换了任务": lambda c: c["mcpServers"]["jha-email-sweep"].__setitem__(
         "args", ["-m", "jha.mcp_server", "--schedule", "daily-jobs"]),
     "toolFilter 多放了工具": lambda c: c["mcpServers"]["jha-email-sweep"]["toolFilter"]["include"].append(
@@ -182,10 +183,10 @@ def test_every_loosening_is_caught(cfg, how):
 
 def test_missing_keys_fail_closed():
     """找不到该有的键就算问题——不是「没写就当没事」。"""
-    found = openclaw.verify({}, shipped(), telegram_id=str(TG))
+    found = openclaw.verify({}, shipped(), discord_id=UID)
     assert any("gateway.bind" in p for p in found)
     assert any("agents.entries" in p for p in found)
-    assert any("channels.telegram" in p for p in found)
+    assert any("channels.discord" in p for p in found)
 
 
 def test_defaults_are_inherited(cfg):

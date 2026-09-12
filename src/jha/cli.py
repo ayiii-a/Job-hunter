@@ -262,7 +262,7 @@ def cmd_fetch(args: argparse.Namespace) -> int:
     else:
         print(digest)
         if not args.dry_run and notify.configured():
-            print("\n（加 --notify 可以推到 Telegram）")
+            print("\n（加 --notify 可以推到 Discord）")
     return 0
 
 
@@ -925,7 +925,7 @@ def cmd_openclaw_config(args: argparse.Namespace) -> int:
     try:
         bundle = openclaw.generate(
             sched_mod.load_all(), settings=openclaw.load_settings(),
-            telegram_id=args.telegram_id or config.env("TELEGRAM_CHAT_ID"),
+            discord_id=args.discord_id or config.env("DISCORD_USER_ID"),
             python_path=args.python, agent_path=args.agent,
         )
     except (sched_mod.ScheduleError, openclaw.ShellConfigError) as exc:
@@ -964,7 +964,7 @@ def cmd_openclaw_verify(args: argparse.Namespace) -> int:
     try:
         cfg = openclaw.load_config(Path(args.path))
         problems = openclaw.verify(cfg, sched_mod.load_all(),
-                                   telegram_id=config.env("TELEGRAM_CHAT_ID"))
+                                   discord_id=config.env("DISCORD_USER_ID"))
     except (sched_mod.ScheduleError, openclaw.ShellConfigError) as exc:
         _err(str(exc))
         return 1
@@ -1024,7 +1024,7 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
             if not res.sent:
                 _err(f"推送失败：{res.detail}")
                 return 1
-            _ok("已推送到 Telegram")
+            _ok("已推送到 Discord")
     if rep.queued:
         print("\n  看队列：agent mail queue")
     return 0
@@ -1218,7 +1218,7 @@ def build_parser() -> argparse.ArgumentParser:
     ru.add_argument("--max-calls", type=int, default=25, help="最多几次 LLM 调用")
     ru.add_argument("--read-only", action="store_true", help="只给只读工具，用于巡检")
     ru.add_argument("--allow-notify", action="store_true",
-                    help="本次允许推送到 Telegram（外发动作，默认拒绝，不延续到下次）")
+                    help="本次允许推送到 Discord（外发动作，默认拒绝，不延续到下次）")
     ru.add_argument("--model", help="覆盖模型，默认 claude-sonnet-5")
     ru.set_defaults(func=cmd_run)
 
@@ -1270,7 +1270,7 @@ def build_parser() -> argparse.ArgumentParser:
     msw.add_argument("--limit", type=int, default=60, help="本次最多分类几封（控制成本）")
     msw.add_argument("--no-fetch", action="store_true", help="不拉新邮件，只处理库里还没处理的")
     msw.add_argument("--push-alerts", action="store_true",
-                     help="有面试邀请 / OA / offer 时推到 Telegram。确定性推送，不经过模型；给定时任务用")
+                     help="有面试邀请 / OA / offer 时推到 Discord。确定性推送，不经过模型；给定时任务用")
     msw.set_defaults(func=cmd_mail_sweep)
     mlsub.add_parser("queue", help="人工确认队列").set_defaults(func=cmd_mail_queue)
     msh = mlsub.add_parser("show", help="看一封邮件的全文和链接")
@@ -1292,7 +1292,7 @@ def build_parser() -> argparse.ArgumentParser:
     oc = sub.add_parser("openclaw", help="OpenClaw 外壳：生成配置、检查配置有没有被改松")
     ocsub = oc.add_subparsers(dest="sub", required=True)
     occ = ocsub.add_parser("config", help="从 schedules.yaml 生成 OpenClaw 配置片段（不碰 ~/.openclaw）")
-    occ.add_argument("--telegram-id", help="你的 Telegram 用户 id（默认取 .env 的 TELEGRAM_CHAT_ID）")
+    occ.add_argument("--discord-id", help="你的 Discord 用户 id（默认取 .env 的 DISCORD_USER_ID）")
     occ.add_argument("--out", help="写到这个目录（建议 data/openclaw）：配置片段、cron 命令、各 agent 的 AGENTS.md")
     occ.add_argument("--python", help="WSL 里看到的 venv python 路径（默认按项目位置推算）")
     occ.add_argument("--agent", help="WSL 里看到的 agent.exe 路径（默认按项目位置推算）")
@@ -1324,7 +1324,7 @@ def build_parser() -> argparse.ArgumentParser:
     fe.add_argument("--dry-run", action="store_true", help="只跑不写库")
     fe.add_argument("--no-detail", action="store_true", help="跳过 JD 全文抓取（只看有哪些岗位）")
     fe.add_argument("--explain", action="store_true", help="显示初筛丢弃原因和样本，用来调过滤条件")
-    fe.add_argument("--notify", action="store_true", help="把摘要推到 Telegram")
+    fe.add_argument("--notify", action="store_true", help="把摘要推到 Discord")
     fe.add_argument("--fast", action="store_true", help="取消请求间隔（只在自己调试时用）")
     fe.set_defaults(func=cmd_fetch)
 

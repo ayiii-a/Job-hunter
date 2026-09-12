@@ -110,12 +110,12 @@ cp .env.example .env
 | `agent mail sweep` | 拉取并处理新邮件（只读） |
 | `agent mail queue` | 人工确认队列；`accept` / `dismiss` / `show <id>` |
 | `agent prep <application_id>` | 面试准备材料 |
-| `agent mail sweep --push-alerts` | 给定时任务用：有面试邀请 / OA / offer 就推到 Telegram（确定性，不经过模型） |
+| `agent mail sweep --push-alerts` | 给定时任务用：有面试邀请 / OA / offer 就推到 Discord（确定性，不经过模型） |
 | `agent openclaw config` | 从 `schedules.yaml` 生成 OpenClaw 配置片段、cron 命令和 AGENTS.md |
 | `agent openclaw verify <path>` | 检查 OpenClaw 配置有没有被改松 |
 
 `agent fetch` 的开关：`--explain` 显示初筛丢弃原因和样本（调过滤条件全靠它）、
-`--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Telegram。
+`--dry-run` 只跑不写库、`--no-detail` 跳过 JD 全文抓取、`--notify` 推到 Discord。
 
 **定时抓取**（路线图建议每天 2–4 次，岗位发布 48 小时内投递回复率明显更高）：
 
@@ -339,14 +339,14 @@ JD 里藏的指令说服了它也无处可施。
 ./.venv/Scripts/agent.exe openclaw verify data/openclaw/openclaw.fragment.json
 ```
 
-verify 默认不通过。下面任何一条都会报错：exec / 浏览器 / web 工具进了白名单、沙箱不是 all、heartbeat 没关、gateway 不是 loopback、Telegram 私聊不止你本人、定时任务的 agent 能从聊天里触发、gateway 上还有别的 agent。
+verify 默认不通过。下面任何一条都会报错：exec / 浏览器 / web 工具进了白名单、沙箱不是 all、heartbeat 没关、gateway 不是 loopback、Discord 私信不止你本人、定时任务的 agent 能从聊天里触发、gateway 上还有别的 agent。
 
 **Spike 清单（在 WSL2 里由你执行）**
 
-1. 按官方文档装固定版本的 OpenClaw，装完跑 `openclaw config schema`，核对 `agents.entries`、`bindings`、`channels.telegram`、`mcpServers.toolFilter` 和 `openclaw cron add` 的参数。生成器按 2026-09 的文档写，键名变了只需要改 `src/jha/openclaw.py`
+1. 按官方文档装固定版本的 OpenClaw，装完跑 `openclaw config schema`，核对 `agents.entries`、`bindings`、`channels.discord`、`mcpServers.toolFilter` 和 `openclaw cron add` 的参数。Discord 这块文档最不全：`channels.discord` 的键名和私信 binding 的 peer id 格式是推断的，重点核对。生成器按 2026-09 的文档写，键名变了只需要改 `src/jha/openclaw.py`
 2. 保活：`/etc/wsl.conf` 里设 `[boot] systemd=true`，gateway 用 systemd 用户服务；Windows 的 `%USERPROFILE%/.wslconfig` 里设 `vmIdleTimeout=-1` 和 `instanceIdleTimeout=-1`
 3. Windows 这边的 venv 装上 MCP SDK：`pip install -e ".[openclaw]"`
-4. 验证六件事：MCP 能从 WSL 拉起 Windows 的 python；transcript 里发给模型的工具只有白名单；isolated + light-context 单次 run 的 input tokens；关掉所有终端 1 小时后 gateway 还在；电脑睡眠唤醒后 cron 会不会补跑（不补跑就用 Windows 任务计划兜底 mail-detect）；别人的 Telegram 账号发来的消息被拒绝
+4. 验证六件事：MCP 能从 WSL 拉起 Windows 的 python；transcript 里发给模型的工具只有白名单；isolated + light-context 单次 run 的 input tokens；关掉所有终端 1 小时后 gateway 还在；电脑睡眠唤醒后 cron 会不会补跑（不补跑就用 Windows 任务计划兜底 mail-detect）；别人的 Discord 账号发来的私信被拒绝
 5. 配置文件里查不到的三件事要自己确认：没装 ClawHub 上的 skill、OpenClaw 版本已固定、保活已配
 
 **记账缺口**：OpenClaw 自己跑 agent 的模型费用不经过我们的 `Budget`。这些 run 在 `agent runs` 里 `model` 是 `openclaw`，成本记为 0；工具内部的第二层调用照常记进 `agent spend`。
@@ -423,6 +423,6 @@ data/       SQLite 库（gitignored；Phase 7 会加每日备份）
 ## 下一步
 
 1. **OpenClaw spike**（半天，在 WSL2 里）：见上面「OpenClaw 外壳」的清单。前三件（MCP 连通、白名单生效、token 开销）任何一件不成立就停下，退回 Windows 任务计划 + `agent run --schedule`。
-2. **填 `.env`**：`ANTHROPIC_API_KEY`、`IMAP_USER` / `IMAP_APP_PASSWORD`、`TELEGRAM_BOT_TOKEN` / `TELEGRAM_CHAT_ID`。没有它们，邮件管线和推送都跑不起来。
+2. **填 `.env`**：`ANTHROPIC_API_KEY`、`IMAP_USER` / `IMAP_APP_PASSWORD`、`DISCORD_WEBHOOK_URL` / `DISCORD_USER_ID`。没有它们，邮件管线和推送都跑不起来。Discord 用两样东西：**推送**用频道 webhook（只能往一个频道发，读不了别的），**聊天入口**用 OpenClaw 那边配的 bot（token 只配在 OpenClaw 里）。两边互不依赖，外壳挂了推送照样发。
 3. **扩充 `config/companies.yaml`**：现在只有两家，路线图建议 30–80 家。用 `agent resolve-ats` 批量查 board_token。
 4. **Phase 6 面试模拟。**

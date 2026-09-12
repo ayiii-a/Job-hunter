@@ -16,7 +16,7 @@ verify **默认不通过**：找不到该有的键就算问题，不是「没写
 
 ## 配置键名
 
-按 2026-09 的官方文档写（`agents.entries`、`bindings`、`channels.telegram`、
+按 2026-09 的官方文档写（`agents.entries`、`bindings`、`channels.discord`、
 `openclaw cron add` 的参数）。OpenClaw 迭代很快，装好之后用 `openclaw config schema`
 核对一遍；键名变了只需要改这个文件。
 """
@@ -38,7 +38,7 @@ from .mcp_server import ScopeError, exposed_tools
 PREFIX = "jha-"
 DEFAULT_SETTINGS: dict[str, str] = {"mail_detect_every": "2h"}
 CRON_MESSAGE = "按 AGENTS.md 里的任务执行一次，然后给我简报。"
-PLACEHOLDER_TG = "<TELEGRAM_USER_ID>"
+PLACEHOLDER_USER = "<DISCORD_USER_ID>"
 
 #: OpenClaw 的内置工具。jha agent 的白名单只能是我们注册表里的名字，
 #: 这份清单只是为了报错时说清楚放进来的是哪一类
@@ -97,15 +97,21 @@ def model_ref(model: str) -> str:
     return f"anthropic/{model}"
 
 
-def telegram_user_id(raw: Any) -> int | None:
+def discord_user_id(raw: Any) -> str | None:
+    """Discord 用户 id 是 17–20 位的 snowflake，一律当字符串处理。
+
+    它超过 JavaScript 的安全整数：写成 JSON 数字，OpenClaw（Node）读进去就被四舍五入成
+    另一个 id——白名单里放的就不是你了。
+    """
     if raw is None or str(raw).strip() == "":
         return None
     s = str(raw).strip()
-    if not re.fullmatch(r"[0-9]+", s):
+    if not re.fullmatch(r"[0-9]{17,20}", s):
         raise ShellConfigError(
-            f"Telegram 用户 id 应该是一串数字：{s!r}。负数是群聊 id——外壳只接你本人的私聊"
+            f"Discord 用户 id 应该是 17–20 位数字：{s!r}。"
+            "设置 → 高级 → 打开开发者模式，然后右键自己的头像 → 复制用户 ID"
         )
-    return int(s)
+    return s
 
 
 def shell_schedules(all_schedules: dict[str, schedules.Schedule]) -> dict[str, schedules.Schedule]:
@@ -127,7 +133,7 @@ def agents_md_text(s: schedules.Schedule) -> str:
 
 def generate(
     all_schedules: dict[str, schedules.Schedule], *, settings: dict[str, str],
-    telegram_id: Any = None, python_path: str | None = None, agent_path: str | None = None,
+    discord_id: Any = None, python_path: str | None = None, agent_path: str | None = None,
 ) -> Bundle:
     """生成配置片段、cron 命令和各 agent 的 AGENTS.md。只返回，不写 ~/.openclaw。"""
     shell = shell_schedules(all_schedules)
@@ -138,11 +144,11 @@ def generate(
         raise ShellConfigError(f"只能有一个聊天入口，现在有 {chats}——同一个人的私聊没法路由给两个 agent")
 
     warnings: list[str] = []
-    tg = telegram_user_id(telegram_id)
-    if tg is None:
-        warnings.append("没有 Telegram 用户 id（--telegram-id 或 .env 的 TELEGRAM_CHAT_ID）。"
+    uid = discord_user_id(discord_id)
+    if uid is None:
+        warnings.append("没有 Discord 用户 id（--discord-id 或 .env 的 DISCORD_USER_ID）。"
                         "配置里先放了占位符，verify 不会通过")
-    tg_value: int | str = tg if tg is not None else PLACEHOLDER_TG
+        uid = PLACEHOLDER_USER
 
     scripts = config.ROOT / ".venv" / "Scripts"
     python = python_path or wsl_path(scripts / "python.exe")
@@ -183,13 +189,13 @@ def generate(
                 "openclaw", "cron", "add", "--name", aid, "--agent", aid,
                 "--cron", s.openclaw["cron"], "--session", "isolated", "--light-context",
                 "--model", model_ref(s.openclaw["model"]), "--message", CRON_MESSAGE,
-                "--announce", "--channel", "telegram", "--to", str(tg_value),
+                "--announce", "--channel", "discord", "--to", f"user:{uid}",
             ]))
         else:
             bindings.append({
                 "agentId": aid,
                 "match": {"channel": s.openclaw["chat"],
-                          "peer": {"kind": "direct", "id": f"tg:{tg_value}"}},
+                          "peer": {"kind": "direct", "id": uid}},
             })
 
     # 时间敏感的部分不经过模型：确定性的检测 + 推送，由外壳的 command 作业定时跑
@@ -208,9 +214,10 @@ def generate(
         },
         "mcpServers": servers,
         "bindings": bindings,
-        "channels": {"telegram": {
-            "enabled": True, "dmPolicy": "allowlist", "allowFrom": [tg_value],
-            "groupPolicy": "allowlist", "groupAllowFrom": [],
+        # bot token 不写进片段：它是密钥，由你在 OpenClaw 那边自己配
+        "channels": {"discord": {
+            "enabled": True, "dmPolicy": "allowlist", "allowFrom": [uid],
+            "groupPolicy": "allowlist", "guilds": {},
         }},
     }
     return Bundle(cfg, crons, agents_md, warnings)
@@ -270,7 +277,7 @@ def _schedule_arg(args: Any) -> str | None:
 
 
 def verify(
-    cfg: dict[str, Any], all_schedules: dict[str, schedules.Schedule], *, telegram_id: Any = None,
+    cfg: dict[str, Any], all_schedules: dict[str, schedules.Schedule], *, discord_id: Any = None,
 ) -> list[str]:
     """返回所有不满足的地方。空列表 = 通过。"""
     problems: list[str] = []
@@ -302,7 +309,7 @@ def verify(
         problems.extend(_verify_agent(aid, e if isinstance(e, dict) else {}, defaults,
                                       servers, all_schedules))
 
-    problems.extend(_verify_telegram(cfg, telegram_id))
+    problems.extend(_verify_discord(cfg, discord_id))
     problems.extend(_verify_bindings(cfg, all_schedules))
     return problems
 
@@ -363,42 +370,46 @@ def _verify_agent(
     return out
 
 
-def _verify_telegram(cfg: dict[str, Any], telegram_id: Any) -> list[str]:
-    tg = _get(cfg, "channels", "telegram")
-    if not isinstance(tg, dict):
-        return ["找不到 channels.telegram——聊天入口和推送都靠它"]
+def _verify_discord(cfg: dict[str, Any], discord_id: Any) -> list[str]:
+    dc = _get(cfg, "channels", "discord")
+    if not isinstance(dc, dict):
+        return ["找不到 channels.discord——聊天入口和推送都靠它"]
 
     out: list[str] = []
-    if tg.get("dmPolicy") != "allowlist":
-        out.append(f"channels.telegram.dmPolicy 应该是 allowlist（现在是 {tg.get('dmPolicy')!r}）"
-                   "——否则陌生人也能跟 agent 说话")
+    if dc.get("dmPolicy") != "allowlist":
+        out.append(f"channels.discord.dmPolicy 应该是 allowlist（现在是 {dc.get('dmPolicy')!r}）"
+                   "——否则陌生人也能私信 agent")
 
-    allow_from = tg.get("allowFrom")
+    allow_from = dc.get("allowFrom")
     if not isinstance(allow_from, list) or not allow_from:
-        out.append("channels.telegram.allowFrom 是空的")
+        out.append("channels.discord.allowFrom 是空的")
     else:
-        bad = [x for x in allow_from if not re.fullmatch(r"[0-9]+", str(x))]
+        numbers = [x for x in allow_from if not isinstance(x, str)]
+        if numbers:
+            out.append(f"channels.discord.allowFrom 里的 id 写成了数字：{numbers}。Discord id 超过 "
+                       "JavaScript 的安全整数，会被四舍五入成另一个 id——要写成字符串")
+        bad = [x for x in allow_from if isinstance(x, str) and not re.fullmatch(r"[0-9]{17,20}", x)]
         if bad:
-            out.append(f"channels.telegram.allowFrom 里有不是用户 id 的值：{bad}")
+            out.append(f"channels.discord.allowFrom 里有不是用户 id 的值：{bad}")
         try:
-            expected = telegram_user_id(telegram_id)
+            expected = discord_user_id(discord_id)
         except ShellConfigError as exc:
             out.append(str(exc))
             expected = None
-        if expected is not None and [str(x) for x in allow_from] != [str(expected)]:
-            out.append(f"channels.telegram.allowFrom 应该只有你本人（{expected}），现在是 {allow_from}")
+        if expected is not None and allow_from != [expected]:
+            out.append(f"channels.discord.allowFrom 应该只有你本人（{expected}），现在是 {allow_from}")
         elif expected is None and len(allow_from) > 1:
-            out.append(f"channels.telegram.allowFrom 里不止一个人：{allow_from}")
+            out.append(f"channels.discord.allowFrom 里不止一个人：{allow_from}")
 
-    if tg.get("groupPolicy") not in ("allowlist", "disabled"):
-        out.append(f"channels.telegram.groupPolicy 应该是 allowlist 或 disabled"
-                   f"（现在是 {tg.get('groupPolicy')!r}）")
-    if tg.get("groupAllowFrom"):
-        out.append("channels.telegram.groupAllowFrom 不是空的——群里的人也能跟 agent 说话")
-    accounts = tg.get("accounts") if isinstance(tg.get("accounts"), dict) else {}
+    if dc.get("groupPolicy") not in ("allowlist", "disabled"):
+        out.append(f"channels.discord.groupPolicy 应该是 allowlist 或 disabled"
+                   f"（现在是 {dc.get('groupPolicy')!r}）")
+    if dc.get("guilds"):
+        out.append("channels.discord.guilds 不是空的——服务器里的人也能跟 agent 说话")
+    accounts = dc.get("accounts") if isinstance(dc.get("accounts"), dict) else {}
     for acc, a in accounts.items():
         if isinstance(a, dict) and a.get("dmPolicy") not in (None, "allowlist"):
-            out.append(f"channels.telegram.accounts.{acc}.dmPolicy 是 {a.get('dmPolicy')!r}，"
+            out.append(f"channels.discord.accounts.{acc}.dmPolicy 是 {a.get('dmPolicy')!r}，"
                        "会盖掉上面的 allowlist")
     return out
 
@@ -413,8 +424,8 @@ def _verify_bindings(cfg: dict[str, Any], all_schedules: dict[str, schedules.Sch
         target = str(_get(b, "agentId", default=""))
         channel = _get(b, "match", "channel")
         if not target.startswith(PREFIX):
-            if channel == "telegram":
-                out.append(f"bindings 把 Telegram 消息路由给了 {target!r}，不是 jha agent")
+            if channel == "discord":
+                out.append(f"bindings 把 Discord 消息路由给了 {target!r}，不是 jha agent")
             continue
         s = all_schedules.get(target[len(PREFIX):])
         if s is None or s.openclaw.get("chat") != channel:

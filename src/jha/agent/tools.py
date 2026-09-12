@@ -696,7 +696,7 @@ def get_prep_pack(conn: sqlite3.Connection, application_id: int) -> dict:
 
 @tool(
     "send_notification",
-    "把一条摘要推送到你配置的 Telegram。这是外发动作，需要人工批准。",
+    "把一条摘要推送到你配置的 Discord 频道。这是外发动作，需要人工批准。",
     Permission.GATED,
     _obj({"text": STR}, ["text"]),
 )

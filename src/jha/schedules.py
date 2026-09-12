@@ -29,7 +29,7 @@ DEFAULT_MAX_LLM_CALLS = 20
 
 #: openclaw 块里允许的字段。说明见 schedules.example.yaml 末尾
 OPENCLAW_KEYS = frozenset({"cron", "chat", "model"})
-CHAT_CHANNELS = frozenset({"telegram"})
+CHAT_CHANNELS = frozenset({"discord"})
 
 
 @dataclass
