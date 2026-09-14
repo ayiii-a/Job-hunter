@@ -62,3 +62,9 @@ def test_not_configured_sends_nothing(monkeypatch):
     monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
     monkeypatch.setattr(notify.httpx, "post", lambda *a, **k: pytest.fail("不该发请求"))
     assert not notify.send("hi").sent
+
+
+def test_real_webhook_is_hidden_from_tests():
+    """实测：.env 在 import 时就加载了，test_persistence 里批准执行的 send_notification
+    每跑一次 pytest 就往真频道发两条 "x"。conftest 把 DISCORD_WEBHOOK_URL 摘掉了，这条守着它。"""
+    assert not notify.configured()

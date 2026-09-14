@@ -949,18 +949,8 @@ def cmd_export(args: argparse.Namespace) -> int:
 
 
 def cmd_answers(args: argparse.Namespace) -> int:
-    from . import questions
-
-    conn = db.connect()
-    db.init_db(conn)
-    job = conn.execute(
-        "SELECT j.title, c.name AS company FROM jobs j "
-        "LEFT JOIN companies c ON c.id = j.company_id WHERE j.id = ?", (args.job_id,)
-    ).fetchone()
-    conn.close()
-    if job is None:
-        _err(f"没有 id 为 {args.job_id} 的岗位")
-        return 1
+    from . import questions, why
+    from .agent.client import Budget
 
     qs = [q.strip() for q in config.read_text(args.questions).splitlines() if q.strip()] \
         if args.questions else list(args.question or [])
@@ -968,7 +958,29 @@ def cmd_answers(args: argparse.Namespace) -> int:
         _err("给几个问题：--question '...' 可以重复，或 --questions <每行一题的文件>")
         return 1
 
-    answers = questions.answer_all(qs, company=job["company"] or "", role=job["title"] or "")
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        job = conn.execute(
+            "SELECT j.title, c.name AS company FROM jobs j "
+            "LEFT JOIN companies c ON c.id = j.company_id WHERE j.id = ?", (args.job_id,)
+        ).fetchone()
+        if job is None:
+            _err(f"没有 id 为 {args.job_id} 的岗位")
+            return 1
+        company, role = job["company"] or "", job["title"] or ""
+        master = profile.load_master_profile()
+        answers = questions.answer_all(qs, company=company, role=role, master=master)
+        if not args.no_draft:
+            # 「为什么想来」按这个岗位起草：第二层调用，过确定性校验，没过就退回模板
+            budget = Budget(max_llm_calls=6)
+            answers = [
+                why.draft(conn, args.job_id, a.question, master=master, budget=budget)
+                if questions.classify(a.question, company)[1] == "why_company_template" else a
+                for a in answers
+            ]
+    finally:
+        conn.close()
     marks = {"verbatim": "✓", "never": "⛔", "draft": "~", "uncovered": "✗"}
     for a in answers:
         print(f"\n{marks[a.kind]} {a.question}")
@@ -1331,6 +1343,7 @@ def build_parser() -> argparse.ArgumentParser:
     aw.add_argument("job_id", type=int)
     aw.add_argument("--question", action="append", help="一题，可重复")
     aw.add_argument("--questions", help="每行一题的文件")
+    aw.add_argument("--no-draft", action="store_true", help="「为什么想来」只套模板，不按岗位起草（不调模型）")
     aw.set_defaults(func=cmd_answers)
 
     ml = sub.add_parser("mail", help="邮件：拉取、分类、人工确认队列（只读）")

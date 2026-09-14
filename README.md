@@ -106,7 +106,7 @@ cp .env.example .env
 | `agent board` | 追踪表 + 下一步建议 + 确认邮件告警 |
 | `agent confirm <id>` | 记下确认邮件到了 |
 | `agent export` | 导出 TSV，可直接粘进 Google Sheet |
-| `agent answers <job_id>` | 申请表自定义问题起草 |
+| `agent answers <job_id>` | 申请表自定义问题起草。「Why are you interested in us?」类按岗位起草（素材优先用 `companies.yaml` 里你写的 `why_note`，其次是 JD；过确定性校验，一律待审）；`--no-draft` 只套模板 |
 | `agent mail sweep` | 拉取并处理新邮件（只读） |
 | `agent mail queue` | 人工确认队列；`accept` / `dismiss` / `show <id>` |
 | `agent prep <application_id>` | 面试准备材料 |

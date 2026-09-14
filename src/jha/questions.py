@@ -74,9 +74,12 @@ _VERBATIM: tuple[tuple[re.Pattern[str], str], ...] = (
 
 #: "Why this company" 单独拎出来：它出现在很大一部分 Greenhouse / Lever 表单上，
 #: 是真正的每份申请时间成本所在——比表单预填重要得多（路线图 Phase 4）。
+#: 实测漏过「Why are you excited to join us at X?」——漏掉就是留空，最值得写好的那题反而没人管
 _WHY_COMPANY = re.compile(
-    r"(?i)why (do you want to |are you interested in )?(work|join|us|our|this|"
-    r"[a-z]+\?)|what (draws|attracts|excites) you"
+    r"(?i)why (do you want to |would you like to |are you interested in )?(work|join|us|our|this|"
+    r"[a-z]+\?)|why are you (excited|interested|passionate|applying)"
+    r"|what (draws|attracts|excites|interests|motivates) you|what (makes|made) you (want|excited|interested)"
+    r"|motivated you to (apply|join)"
 )
 
 
@@ -101,15 +104,17 @@ class Answer:
         }
 
 
-def classify(question: str) -> tuple[str, str | None]:
-    """给一个问题分档。返回 (档位, qa_bank 键)。"""
+def classify(question: str, company: str = "") -> tuple[str, str | None]:
+    """给一个问题分档。返回 (档位, qa_bank 键)。给了公司名还能认出「Why Scale AI?」这种。"""
     q = question or ""
     if _NEVER.search(q) or _NEVER_LEGAL.search(q):
         return Kind.NEVER, None
     for pattern, key in _VERBATIM:
         if pattern.search(q):
             return Kind.VERBATIM, key
-    if _WHY_COMPANY.search(q):
+    if _WHY_COMPANY.search(q) or (
+        company.strip() and re.search(rf"(?i)\bwhy\s+(join(ing)?\s+)?{re.escape(company.strip())}", q)
+    ):
         return Kind.DRAFT, "why_company_template"
     return Kind.DRAFT, None
 
@@ -117,7 +122,7 @@ def classify(question: str) -> tuple[str, str | None]:
 def answer_one(
     question: str, qa_bank: dict[str, Any], *, company: str = "", role: str = ""
 ) -> Answer:
-    kind, key = classify(question)
+    kind, key = classify(question, company)
 
     if kind == Kind.NEVER:
         return Answer(question, Kind.NEVER, note=(

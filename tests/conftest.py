@@ -19,3 +19,10 @@ def pytest_collection_modifyitems(config, items):
     for item in items:
         if "live" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _no_real_webhook(monkeypatch):
+    """config 在 import 时就加载 .env。不摘掉的话，批准执行 send_notification 的测试会往你的真频道发消息
+    （实测每跑一次 pytest 发两条 "x"）。要测推送的测试自己 setenv 一个假地址。"""
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)

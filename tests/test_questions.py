@@ -126,6 +126,23 @@ def test_why_company_flags_leftover_placeholders():
     assert "占位符" in a.note
 
 
+@pytest.mark.parametrize("q,company", [
+    ("Why are you excited to join us at Ramp?", ""),
+    ("What motivated you to apply?", ""),
+    ("What interests you about this role?", ""),
+    ("What makes you want to join Ramp?", ""),
+    ("Why Scale AI?", "Scale AI"),
+])
+def test_why_company_variants_are_recognized(q, company):
+    """实测漏过「Why are you excited to join us」——漏掉就是留空，最值得写好的那题反而没人管。"""
+    assert questions.classify(q, company) == (Kind.DRAFT, "why_company_template")
+
+
+@pytest.mark.parametrize("q", ["Why did you leave your last job?", "Why Scale AI?"])
+def test_why_company_does_not_over_match(q):
+    assert questions.classify(q)[1] is None
+
+
 def test_missing_template_is_uncovered_not_invented():
     a = questions.answer_one("Why do you want to work here?",
                              {**QA, "why_company_template": ""})
