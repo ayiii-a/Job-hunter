@@ -56,6 +56,38 @@ def conn():
 
 
 # ---------------------------------------------------------------------------
+# system prompt：身份背景从母简历拼，不写死某个人
+# ---------------------------------------------------------------------------
+
+def test_system_prompt_is_built_from_the_master_profile():
+    master = {
+        "basics": {"work_authorization": "Needs sponsorship after OPT."},
+        "education": [
+            {"school": "Old U", "degree": "B.S.", "period": "2018 ~ 2022"},
+            {"school": "New U", "degree": "M.S. Computer Science", "period": "2024-09 ~ 2026-05"},
+        ],
+    }
+    prompt = loop.get_system_prompt(master)
+    assert "M.S. Computer Science，New U，2024-09 ~ 2026-05" in prompt, "取最近的那段学历"
+    assert "Old U" not in prompt
+    assert "Needs sponsorship after OPT." in prompt
+    assert "F-1" not in prompt and "AI Engineer" not in prompt, "不能再写死某个人的背景"
+
+
+def test_system_prompt_without_a_profile_is_still_complete():
+    prompt = loop.get_system_prompt({})
+    assert "求职者。" in prompt and "不可信输入" in prompt
+    assert "None" not in prompt
+
+
+def test_run_uses_the_built_system_prompt(conn, monkeypatch):
+    monkeypatch.setattr(loop, "get_system_prompt", lambda master=None: "SYS")
+    client = FakeClient([[text_block("ok")]])
+    loop.run("看看", conn, client=client, record=False)
+    assert client.calls[0]["system"] == "SYS"
+
+
+# ---------------------------------------------------------------------------
 # 安全边界 —— 这一组是这个架构成立的前提
 # ---------------------------------------------------------------------------
 

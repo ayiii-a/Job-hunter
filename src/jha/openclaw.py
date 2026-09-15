@@ -31,7 +31,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from . import config, profile, schedules
-from .agent.loop import SYSTEM
+from .agent.loop import get_system_prompt
 from .agent.tools import REGISTRY, Permission
 from .mcp_server import ScopeError, exposed_tools
 
@@ -128,7 +128,7 @@ def agents_md_text(s: schedules.Schedule) -> str:
         f"# {PREFIX}{s.name}\n\n"
         "> 由 `agent openclaw config` 从 config/schedules.yaml 生成。要改行为就改那份文件再重新生成——"
         "直接改这里，下次生成就被覆盖，而且没有版本历史。\n\n"
-        f"{SYSTEM}\n\n## 你的任务\n\n{s.task.strip()}\n"
+        f"{get_system_prompt()}\n\n## 你的任务\n\n{s.task.strip()}\n"
     )
 
 
