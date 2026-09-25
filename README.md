@@ -43,7 +43,7 @@ Human-in-the-loop by design: data stays on your machine and every outbound actio
 | Resume tailoring | Selects bullets from the master resume by id, rewrites wording toward JD keywords, renders a PDF, enforces one page and checks for fabrication | `agent tailor <job_id>` |
 | Application questions | Handles form questions in three tiers; drafts "Why this company" answers per job and verifies them | `agent answers <job_id>` |
 | Application tracking | Event-sourced state machine, next-step suggestions, missing-confirmation alerts, TSV export | `agent board` |
-| Email processing | Read-only IMAP fetch, classification, matching to applications, and cost-of-error routing to auto-write or a review queue | `agent mail sweep` |
+| Email processing | Read-only IMAP fetch; summarizes and classifies each message, updates the matching application or creates one for applications made elsewhere, and pushes anything that needs action | `agent mail sweep` |
 | Interview prep | Collects JD highlights, skill gaps, the exact resume version you sent, and referral contacts | `agent prep <application_id>` |
 | Agent loop | The model calls tools on its own to complete a task; every step is logged | `agent run "<task>"` |
 | Automation | Named scheduled tasks; an optional OpenClaw shell adds always-on running and read-only phone queries | `agent schedules` |
@@ -55,7 +55,7 @@ Human-in-the-loop by design: data stays on your machine and every outbound actio
 1. **The security boundary is the tool registry, not the prompt.** Submitting applications, sending email and opening links simply do not exist in the code, so a model persuaded by injected text in a JD or email still cannot call them. `agent tools` prints this list of deliberately missing capabilities.
 2. **Layered model calls.** Large untrusted text — full JDs, email bodies — is processed only inside tools, in isolated single-shot calls, and never enters the agent's conversation history. This controls both cost and the injection surface.
 3. **Deterministic verification.** Fabrication checks, application-question tiering and the one-page constraint are deterministic code, not a second model call.
-4. **Human in the loop.** Resume review, interview-invite confirmation and application submission are done by a person, and none of these capabilities is exposed to the agent.
+4. **Human in the loop.** Resume review, offer confirmation and application submission are done by a person, and none of these capabilities is exposed to the agent.
 5. **Local data.** The database, master resume and mailbox credentials never leave your machine.
 
 ---
@@ -196,8 +196,8 @@ Each file has a matching `*.example.yaml` that serves as the template and field 
 | `agent applied <job_id>` | Record an application you submitted yourself |
 | `agent confirm <id>` | Record that a confirmation email arrived |
 | `agent board` | Tracking board, next-step suggestions, missing-confirmation alerts |
-| `agent mail sweep` | Fetch and process new email (read-only). `--push-alerts` pushes messages that need action |
-| `agent mail queue` / `accept <id>` / `dismiss <id>` | Human review queue |
+| `agent mail sweep` | Fetch and process new email (read-only). `--push-alerts` pushes messages that need action; `--requeue` re-runs messages still in the review queue under the current rules |
+| `agent mail queue` / `accept <id>` / `dismiss <id>` | Human review queue. `accept --create` records an application that isn't in the table yet (`--company` / `--role` to override the names) |
 
 **Agent and automation**
 
@@ -245,13 +245,15 @@ If no mail check has succeeded for more than 6 hours, it is reported as stale �
 
 ### Deliberately missing capabilities
 
-Submitting applications, sending email, opening links and deleting records are not implemented, and tests assert they never get added. The review gate (`agent resume approve`) and interview-invite confirmation (`agent mail accept`) exist only on the command line, out of the agent's reach.
+Submitting applications, sending email, opening links and deleting records are not implemented, and tests assert they never get added. The review gate (`agent resume approve`) and review-queue confirmation (`agent mail accept`) exist only on the command line, out of the agent's reach.
 
 ### Read-only email
 
 The mailbox is opened with `EXAMINE`, messages are fetched only with `BODY.PEEK[]` (so nothing gets marked as read), and a code-level allow-list permits only SEARCH and FETCH. Neither email bodies nor subject lines enter the agent's context.
 
-Classification results are routed by the cost of getting them wrong: confirmations and rejections are written automatically; **interview invites, OAs and offers always go to the human review queue**.
+Classification results are routed by the cost of getting them wrong. Confirmations, rejections, interview invites and OAs update the matching application automatically, and invites and OAs also trigger a push. **Offers always go to the human review queue**: they are few, costly to get wrong, and offer scams target new grads. A rejection whose body contains scheduling language is queued too, so an invite is never filed as a rejection.
+
+Applications don't have to come from this tool. When an email matches no application — you applied on LinkedIn or a company site — a record is created, but only if the sender is trustworthy (a registered company domain, an ATS, or a job board) and the company name actually appears in the email. Company and role names taken from email pass deterministic checks (character set, length, present in the original text) before they are stored, because they later appear in pushes and in the tracking table the agent can read. Each application shows the latest email summary on `agent board` and in the export; the summary is never given to the agent.
 
 ### Resume fabrication checks
 

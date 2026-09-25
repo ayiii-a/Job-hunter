@@ -2,8 +2,16 @@
 
 ## 人工确认队列只在 CLI 里
 
-面试邀请、OA、offer 进队列之后，**确认它们的函数不是 agent 的工具**。
+进队列的邮件（offer、置信度低、分不清是哪条投递、发件方可疑却要建档的），
+**确认它们的函数不是 agent 的工具**。
 和简历的审核门同一个道理：人工确认如果 agent 能自己做，那就不是人工确认。
+
+## 表里没有的投递会自动补上
+
+表里的投递不一定都是 agent 投的：你在 LinkedIn、公司官网投的岗位来信时，
+确认信、拒信、面试、OA 会新建一条投递记录（策略见 policy.py）。
+公司名、岗位名是分类器从邮件里抽的——写进库之前过 `clean_name` 的确定性检查，
+因为它们之后会出现在推送里、出现在 agent 看得到的投递表里。
 
 ## 给 agent 的东西里没有邮件原文
 
@@ -14,12 +22,13 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
-from .. import db
+from .. import db, tracking
 from .imap import MailReader, RawEmail
 from . import match as match_mod
 from . import policy, prefilter
@@ -32,6 +41,7 @@ class SweepReport:
     filtered: int = 0
     classified: int = 0
     auto_applied: int = 0
+    created: int = 0          # 其中新建了几条投递记录（表里原来没有的）
     queued: int = 0
     ignored: int = 0
     alerts: list[dict[str, Any]] = field(default_factory=list)
@@ -40,7 +50,8 @@ class SweepReport:
     def compact(self) -> dict[str, Any]:
         return {
             "filtered_out": self.filtered, "classified": self.classified,
-            "auto_applied": self.auto_applied, "queued_for_human": self.queued,
+            "auto_applied": self.auto_applied, "records_created": self.created,
+            "queued_for_human": self.queued,
             "ignored": self.ignored, "alerts": self.alerts, "errors": self.errors[:5],
         }
 
@@ -87,11 +98,55 @@ def ingest(
 # 处理
 # ---------------------------------------------------------------------------
 
+#: 可信的发件方：只有它们的邮件能直接新建投递记录
+TRUSTED_CHANNELS = frozenset({"company", "ats", "board"})
+
+#: 从邮件里取、要写进表的名字只能由这些字符组成：字母数字和几种常见标点，没有链接、尖括号
+_NAME_CHARS = re.compile(r"^[\w &.,'’()/+#-]+$")
+
+#: 分类器偶尔会把转发平台当成招聘公司
+_PLATFORM_NAMES = frozenset({
+    "linkedin", "indeed", "glassdoor", "handshake", "wellfound", "ziprecruiter",
+    "greenhouse", "lever", "ashby", "workday", "smartrecruiters", "icims",
+})
+
+
+def clean_name(raw: Any, source_text: str | None, *, max_words: int) -> str:
+    """分类器从邮件里抽的公司名 / 岗位名能不能写进表。不能就返回空串。
+
+    这些名字之后会出现在推送里、出现在 agent 看得到的投递表里，而它们来自不可信的邮件。
+    所以三道确定性检查：字符集和长度（挡链接、挡一整句话）、不是招聘平台的名字、
+    **确实是邮件原文里出现过的字**（分类器补全或编出来的不收）。
+    source_text 传 None 表示是你亲手给的名字，不查最后一道。
+    """
+    s = " ".join(str(raw or "").split())
+    if not 2 <= len(s) <= 80 or len(s.split()) > max_words or not _NAME_CHARS.match(s):
+        return ""
+    low = s.lower()
+    if "http" in low or "www." in low or low in _PLATFORM_NAMES:
+        return ""
+    if source_text is not None and low not in " ".join(source_text.split()).lower():
+        return ""
+    return s
+
+
 def _received(row: sqlite3.Row) -> datetime | None:
     try:
         return db._parse_dt(row["received_at"]) if row["received_at"] else None
     except (ValueError, TypeError):
         return None
+
+
+def _write_event(
+    conn: sqlite3.Connection, row: sqlite3.Row, app_id: int, ctype: str, event_type: str,
+    *, source: str, payload: dict[str, Any],
+) -> int:
+    event_id = db.append_event(conn, app_id, event_type, occurred_at=_received(row),
+                               source=source, raw_ref=str(row["id"]), payload=payload)
+    if ctype == "confirmation":
+        conn.execute("UPDATE applications SET confirmation_seen_at = COALESCE(confirmation_seen_at, ?) "
+                     "WHERE id = ?", (row["received_at"], app_id))
+    return event_id
 
 
 def process_pending(
@@ -137,22 +192,30 @@ def process_pending(
         m = match_mod.match(conn, from_addr=sender, subject=subject, body=body,
                             company_id=pre.company_id, role_hint=cls.get("role_hint") or "")
 
+        # 要从邮件里取公司名、岗位名建档时，先过确定性检查
+        text = f"{sender}\n{subject}\n{body}"
+        company = "" if m.company_id else clean_name(cls.get("company"), text, max_words=6)
+        role = clean_name(cls.get("role_hint"), text, max_words=12)
+
         # 4. 按误判代价决定
         d = policy.decide(ctype=cls["type"], confidence=cls["confidence"],
-                          match_status=m.status, text=f"{subject}\n{body}")
+                          match_status=m.status, text=f"{subject}\n{body}",
+                          trusted_sender=pre.channel in TRUSTED_CHANNELS,
+                          company_known=bool(m.company_id or company))
+
+        app_id = m.application_id
+        if d.action == "create":
+            app_id = tracking.record_from_email(
+                conn, company_id=m.company_id, company_name=company, title=role,
+                occurred_at=_received(r), email_id=r["id"],
+                applied_at=r["received_at"] if cls["type"] == "confirmation" else None,
+            )
+            rep.created += 1
 
         event_id = None
-        if d.action == "auto_apply" and d.event_type and m.application_id:
-            event_id = db.append_event(
-                conn, m.application_id, d.event_type, occurred_at=_received(r),
-                source="email", raw_ref=str(r["id"]),
-                payload={"email_id": r["id"], "confidence": cls["confidence"]},
-            )
-            if cls["type"] == "confirmation":
-                conn.execute(
-                    "UPDATE applications SET confirmation_seen_at = COALESCE(confirmation_seen_at, ?) "
-                    "WHERE id = ?", (r["received_at"], m.application_id),
-                )
+        if d.action in ("auto_apply", "create") and d.event_type and app_id:
+            event_id = _write_event(conn, r, app_id, cls["type"], d.event_type, source="email",
+                                    payload={"email_id": r["id"], "confidence": cls["confidence"]})
             rep.auto_applied += 1
         elif d.action == "queue":
             rep.queued += 1
@@ -160,12 +223,12 @@ def process_pending(
             rep.ignored += 1
 
         conn.execute(
-            "UPDATE emails SET classification=?, confidence=?, role_hint=?, summary=?, "
+            "UPDATE emails SET classification=?, confidence=?, role_hint=?, company_hint=?, summary=?, "
             "dates_json=?, action_required=?, matched_application_id=?, policy=?, "
             "review_status=?, reason=?, event_id=?, classifier_version=? WHERE id=?",
-            (cls["type"], cls["confidence"], cls.get("role_hint"), cls.get("summary"),
+            (cls["type"], cls["confidence"], cls.get("role_hint"), cls.get("company"), cls.get("summary"),
              db.dump_json(cls.get("dates") or []), 1 if cls.get("action_required") else 0,
-             m.application_id, d.action, "pending" if d.action == "queue" else None,
+             app_id, d.action, "pending" if d.action == "queue" else None,
              d.reason + (f"；{m.reason}" if m.reason else ""), event_id,
              classify.CLASSIFIER_VERSION, r["id"]),
         )
@@ -180,7 +243,7 @@ def process_pending(
 # ---------------------------------------------------------------------------
 
 _QUEUE_SQL = """
-SELECT e.id, e.classification, e.confidence, e.matched_application_id, e.reason,
+SELECT e.id, e.classification, e.confidence, e.matched_application_id, e.reason, e.policy,
        e.received_at, c.name AS company, j.title AS job_title
 FROM emails e
 LEFT JOIN applications a ON a.id = e.matched_application_id
@@ -199,6 +262,7 @@ def _row_for_agent(r: sqlite3.Row) -> dict[str, Any]:
         "matched_application_id": r["matched_application_id"],
         "company": r["company"], "job_title": r["job_title"],   # 来自我们的库，不是邮件
         "reason": r["reason"],
+        "action": r["policy"],       # 我们的枚举：auto_apply / create / queue ...
     }
 
 
@@ -224,31 +288,51 @@ def queue_for_human(conn: sqlite3.Connection) -> list[sqlite3.Row]:
     ).fetchall()
 
 
-def accept(conn: sqlite3.Connection, email_id: int, *, application_id: int | None = None) -> dict[str, Any]:
-    """人工确认一封邮件的建议。**不是 agent 的工具。**"""
+def accept(
+    conn: sqlite3.Connection, email_id: int, *, application_id: int | None = None,
+    create: bool = False, company: str | None = None, role: str | None = None,
+) -> dict[str, Any]:
+    """人工确认一封邮件的建议。**不是 agent 的工具。**
+
+    没匹配到投递时：application_id 指定已有的一条；确定是新的投递就 create=True，
+    公司、岗位默认取分类器从邮件里抽的（过同样的检查），也可以自己给。
+    """
     row = conn.execute("SELECT * FROM emails WHERE id = ?", (email_id,)).fetchone()
     if row is None:
         raise ValueError(f"没有 id 为 {email_id} 的邮件")
     if row["review_status"] != "pending":
         raise ValueError(f"邮件 #{email_id} 不在待确认队列里（{row['review_status']}）")
 
-    app_id = application_id or row["matched_application_id"]
-    if not app_id:
-        raise ValueError(f"邮件 #{email_id} 没匹配到投递记录——用 --application <id> 指定")
-    if conn.execute("SELECT 1 FROM applications WHERE id = ?", (app_id,)).fetchone() is None:
-        raise ValueError(f"没有 id 为 {app_id} 的投递记录")
-
-    event_type = policy.STATUS_EVENT.get(row["classification"] or "")
+    ctype = row["classification"] or ""
+    event_type = policy.STATUS_EVENT.get(ctype)
     if not event_type:
         raise ValueError(f"「{row['classification']}」类邮件没有对应的状态事件，用 dismiss")
 
-    event_id = db.append_event(
-        conn, app_id, event_type, occurred_at=_received(row), source="manual",
-        raw_ref=str(email_id), payload={"email_id": email_id, "accepted_from_queue": True},
-    )
-    if row["classification"] == "confirmation":
-        conn.execute("UPDATE applications SET confirmation_seen_at = COALESCE(confirmation_seen_at, ?) "
-                     "WHERE id = ?", (row["received_at"], app_id))
+    app_id = application_id or row["matched_application_id"]
+    if app_id:
+        if conn.execute("SELECT 1 FROM applications WHERE id = ?", (app_id,)).fetchone() is None:
+            raise ValueError(f"没有 id 为 {app_id} 的投递记录")
+    elif not create:
+        raise ValueError(
+            f"邮件 #{email_id} 没匹配到投递记录——用 --application <id> 指定已有的一条；"
+            "确定是新的投递就加 --create（公司、岗位可以用 --company / --role 给）"
+        )
+    else:
+        text = f"{row['from_addr']}\n{row['subject']}\n{row['body_text']}"
+        name = (clean_name(company, None, max_words=6) if company
+                else clean_name(row["company_hint"], text, max_words=6))
+        if not name:
+            raise ValueError("认不出公司名——用 --company 指定")
+        title = (clean_name(role, None, max_words=12) if role
+                 else clean_name(row["role_hint"], text, max_words=12))
+        app_id = tracking.record_from_email(
+            conn, company_id=None, company_name=name, title=title, occurred_at=_received(row),
+            email_id=email_id, source="manual",
+            applied_at=row["received_at"] if ctype == "confirmation" else None,
+        )
+
+    event_id = _write_event(conn, row, app_id, ctype, event_type, source="manual",
+                            payload={"email_id": email_id, "accepted_from_queue": True})
     conn.execute("UPDATE emails SET review_status = 'accepted', matched_application_id = ?, "
                  "event_id = ? WHERE id = ?", (app_id, event_id, email_id))
     conn.commit()
@@ -267,6 +351,19 @@ def dismiss(conn: sqlite3.Connection, email_id: int, *, note: str = "") -> dict[
         raise ValueError(f"邮件 #{email_id} 不在待确认队列里")
     conn.commit()
     return {"email_id": email_id, "review_status": "dismissed"}
+
+
+def requeue_pending(conn: sqlite3.Connection) -> int:
+    """把还在人工队列里的邮件放回待处理，下次 process_pending 按现在的规则重新分类、重新判。
+
+    规则放宽之后（比如对不上投递的确认信现在会建档），队列里的旧邮件不会自己重新判——
+    它们已经处理过了。确认过、驳回过的不动：那是你做的决定。
+    队列里的邮件没写过任何事件，所以放回去不会重复记账。
+    """
+    cur = conn.execute("UPDATE emails SET policy = NULL, review_status = NULL, reason = NULL "
+                       "WHERE review_status = 'pending'")
+    conn.commit()
+    return cur.rowcount
 
 
 # ---------------------------------------------------------------------------
@@ -326,12 +423,14 @@ def alert_text(alerts: list[dict[str, Any]]) -> str:
     """即时提醒的推送文本。
 
     这条推送不经过模型，但它是发出去的东西，所以和给 agent 的输出守同一条线：
-    只拼库里的字段（公司、岗位来自我们的库，类型是分类器的枚举值），
+    只拼库里的字段（公司、岗位来自我们的库，类型和处理方式是我们的枚举值），
     **不含主题行和正文**。要看原文，回电脑上跑 agent mail show。
+    从邮件自动建档的公司、岗位名是分类器抽出来的，写进库之前过了 clean_name 的检查。
     """
     lines = [f"{len(alerts)} 封邮件需要你尽快处理："]
     for a in alerts:
         where = f"{a.get('company') or '?'} — {a.get('job_title') or '未匹配到投递'}"
-        lines.append(f"#{a.get('email_id')} [{a.get('type')}] {where}")
+        done = "已记进投递表" if a.get("action") in ("auto_apply", "create") else "待你确认"
+        lines.append(f"#{a.get('email_id')} [{a.get('type')}] {where} · {done}")
     lines.append("在电脑上看：agent mail queue")
     return "\n".join(lines)

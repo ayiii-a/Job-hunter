@@ -34,7 +34,7 @@ FOLLOW_UP_DAYS = 14
 
 COLUMNS = (
     "公司", "岗位", "状态", "投递日", "渠道", "内推人",
-    "最近事件", "简历版本", "匹配档位", "下一步", "备注",
+    "最近事件", "简历版本", "匹配档位", "下一步", "最新邮件", "备注",
 )
 
 
@@ -51,13 +51,15 @@ class TrackingRow:
     resume_version: str = ""
     verdict: str = ""
     next_step: str = ""
+    #: 最近一封相关邮件的摘要。只给人看（board、导出）——摘要是从不可信邮件生成的，不进 agent 的上下文
+    last_email: str = ""
     notes: str = ""
 
     def as_cells(self) -> list[str]:
         return [
             self.company, self.title, self.status, (self.applied_at or "")[:10],
             self.applied_via, self.referral, self.last_event,
-            self.resume_version, self.verdict, self.next_step, self.notes,
+            self.resume_version, self.verdict, self.next_step, self.last_email, self.notes,
         ]
 
 
@@ -129,7 +131,11 @@ def tracking_rows(conn: sqlite3.Connection, *, now: datetime | None = None) -> l
                (SELECT type || ' @ ' || substr(occurred_at, 1, 10) FROM events e
                  WHERE e.application_id = a.id ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1) AS last_event,
                (SELECT occurred_at FROM events e
-                 WHERE e.application_id = a.id ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1) AS last_event_at
+                 WHERE e.application_id = a.id ORDER BY e.occurred_at DESC, e.id DESC LIMIT 1) AS last_event_at,
+               (SELECT COALESCE(substr(m.received_at, 1, 10), '') || ' ' || COALESCE(m.classification, '')
+                       || '：' || m.summary FROM emails m
+                 WHERE m.matched_application_id = a.id AND COALESCE(m.summary, '') != ''
+                 ORDER BY m.received_at DESC, m.id DESC LIMIT 1) AS last_email
         FROM applications a
         JOIN jobs j ON j.id = a.job_id
         LEFT JOIN companies c ON c.id = j.company_id
@@ -158,6 +164,7 @@ def tracking_rows(conn: sqlite3.Connection, *, now: datetime | None = None) -> l
             last_event=r["last_event"] or "",
             resume_version=resume,
             verdict=r["verdict"] or "",
+            last_email=r["last_email"] or "",
             notes=r["notes"] or "",
             next_step=next_step(
                 status=r["status"],
@@ -219,6 +226,56 @@ def mark_confirmed(
     db.append_event(conn, application_id, "confirmation_received",
                     occurred_at=when, source="manual")
     return {"application_id": application_id, "confirmation_seen_at": ts}
+
+
+# ---------------------------------------------------------------------------
+# 从邮件补建投递记录
+# ---------------------------------------------------------------------------
+
+#: 邮件里没写岗位名时，自动建档用的占位岗位名
+UNKNOWN_ROLE = "(岗位未写明)"
+
+
+def record_from_email(
+    conn: sqlite3.Connection, *, company_id: int | None, company_name: str, title: str,
+    occurred_at: datetime | None, email_id: int, applied_at: str | None, source: str = "email",
+) -> int:
+    """凭一封邮件给投递表补一条记录（你在 LinkedIn、公司官网等别处投的）。返回 application id。
+
+    名字由调用方先过校验（mail/pipeline.py::clean_name），这里只管落库：
+      公司  按名字找，找不到就新建：不写 email_domains（域名只能来自你登记的配置，不能来自邮件），
+            is_active=0（没有 ATS 信息，不参与抓取）
+      岗位  这家公司抓到过同名岗位就挂在它下面（分析、匹配档位都用得上），否则新建一条 source='email'
+      投递  已经有了就直接返回。投递日只在确认信时填——别的邮件看不出你哪天投的，就不编
+    """
+    if company_id is None:
+        row = conn.execute("SELECT id FROM companies WHERE lower(name) = lower(?)",
+                           (company_name,)).fetchone()
+        company_id = row["id"] if row else int(conn.execute(
+            "INSERT INTO companies (name, is_active, notes) VALUES (?, 0, ?)",
+            (company_name, f"由邮件 #{email_id} 自动建档；没有 ATS 信息，不参与抓取"),
+        ).lastrowid)
+
+    title = title or UNKNOWN_ROLE
+    job = conn.execute(
+        "SELECT id FROM jobs WHERE company_id = ? AND lower(title) = lower(?) "
+        "ORDER BY source = 'email', id LIMIT 1", (company_id, title),
+    ).fetchone()
+    job_id = job["id"] if job else int(conn.execute(
+        "INSERT INTO jobs (company_id, source, external_id, title) VALUES (?, 'email', ?, ?)",
+        (company_id, f"{company_id}:{title.lower()}", title),
+    ).lastrowid)
+
+    existing = conn.execute("SELECT id FROM applications WHERE job_id = ?", (job_id,)).fetchone()
+    if existing:
+        return int(existing["id"])
+    app_id = int(conn.execute(
+        "INSERT INTO applications (job_id, applied_at, notes) VALUES (?, ?, ?)",
+        (job_id, applied_at, f"由邮件 #{email_id} 自动建档"),
+    ).lastrowid)
+    db.append_event(conn, app_id, "applied", occurred_at=occurred_at, source=source,
+                    raw_ref=str(email_id), payload={"email_id": email_id, "inferred_from_email": True})
+    return app_id
 
 
 # ---------------------------------------------------------------------------

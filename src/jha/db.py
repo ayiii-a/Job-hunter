@@ -39,6 +39,7 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("emails", "message_id", "TEXT"),
     ("emails", "from_domain", "TEXT"),
     ("emails", "role_hint", "TEXT"),
+    ("emails", "company_hint", "TEXT"),
     ("emails", "summary", "TEXT"),
     ("emails", "dates_json", "TEXT NOT NULL DEFAULT '[]'"),
     ("emails", "links_json", "TEXT NOT NULL DEFAULT '[]'"),

@@ -7,6 +7,9 @@
 `greenhouse-mail.io` 是所有用 Greenhouse 的公司共用的发信域名。如果某家公司的
 `email_domains` 里写了它，照字面匹配会把**每一封** Greenhouse 邮件都认成那家公司。
 所以共享域名只用来判断「这是招聘系统发的」，认公司要看发件人显示名和正文。
+
+发件方分四种（PrefilterResult.channel）：登记过的公司域名、招聘系统、求职平台、只是主题像求职邮件。
+前三种算可信的发件方，只有它们的邮件能直接新建投递记录（见 policy.py）。
 """
 
 from __future__ import annotations
@@ -25,6 +28,13 @@ SHARED_ATS_DOMAINS: frozenset[str] = frozenset({
     "hackerrank.com", "codesignal.com", "codility.com",
 })
 
+#: 求职平台。它们发的「申请已发送」是可信的确认信，但也发大量推荐和动态——
+#: 所以不像 ATS 域名那样整域放行，只在主题像求职邮件时才放进来
+JOB_BOARD_DOMAINS: frozenset[str] = frozenset({
+    "linkedin.com", "indeed.com", "indeedemail.com", "joinhandshake.com",
+    "wellfound.com", "glassdoor.com", "ziprecruiter.com",
+})
+
 SUBJECT_KEYWORDS: tuple[str, ...] = (
     "application", "applied", "applying", "interview", "assessment", "offer",
     "unfortunately", "next steps", "candidacy", "thank you for your interest",
@@ -38,6 +48,8 @@ class PrefilterResult:
     reason: str
     company_id: int | None = None
     via_ats: bool = False
+    #: 发件方是谁：company（登记过的公司域名）| ats（招聘系统）| board（求职平台）| keyword（只是主题像）
+    channel: str = ""
 
 
 def _get(obj: Any, key: str) -> str:
@@ -75,11 +87,14 @@ def screen(email_obj: Any, domain_map: dict[str, int]) -> PrefilterResult:
 
     for d, cid in domain_map.items():
         if domain_matches(sender, d):
-            return PrefilterResult(True, f"已投公司域名：{d}", company_id=cid)
+            return PrefilterResult(True, f"已投公司域名：{d}", company_id=cid, channel="company")
     for d in SHARED_ATS_DOMAINS:
         if domain_matches(sender, d):
-            return PrefilterResult(True, f"招聘系统发信域名：{d}", via_ats=True)
+            return PrefilterResult(True, f"招聘系统发信域名：{d}", via_ats=True, channel="ats")
     for kw in SUBJECT_KEYWORDS:
         if kw in subject:
-            return PrefilterResult(True, f"主题关键词：{kw}")
+            board = next((d for d in JOB_BOARD_DOMAINS if domain_matches(sender, d)), None)
+            if board:
+                return PrefilterResult(True, f"求职平台 {board}，主题关键词：{kw}", channel="board")
+            return PrefilterResult(True, f"主题关键词：{kw}", channel="keyword")
     return PrefilterResult(False, "既不是已投公司、也不是招聘系统，主题也不像求职邮件")

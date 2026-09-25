@@ -18,7 +18,7 @@ from typing import Any
 from ..agent.client import AgentClient, Budget, BudgetExceeded, MissingAPIKey
 
 #: 改 prompt 或 schema 就 bump
-CLASSIFIER_VERSION = "v1"
+CLASSIFIER_VERSION = "v2"
 CLASSIFIER_MODEL = "claude-haiku-4-5"
 
 TYPES = (
@@ -31,7 +31,8 @@ SCHEMA: dict[str, Any] = {
     "properties": {
         "type": {"type": "string", "enum": list(TYPES)},
         "confidence": {"type": "number", "description": "0 到 1"},
-        "company": {"type": "string"},
+        "company": {"type": "string",
+                    "description": "招聘公司名，照邮件原文抄；LinkedIn 等平台转发的填招聘公司，不填平台；看不出就留空"},
         "role_hint": {"type": "string", "description": "邮件里提到的岗位名，原文照抄；没有就留空"},
         "summary": {"type": "string", "description": "一句话：这封邮件要你做什么"},
         "action_required": {"type": "boolean"},
@@ -52,7 +53,7 @@ SCHEMA: dict[str, Any] = {
 
 SYSTEM = """你是求职邮件分类器。判断一封邮件属于哪一类。
 
-  confirmation        只是确认收到申请，没有任何进展
+  confirmation        只是确认收到申请，没有任何进展（包括 LinkedIn / Indeed 等平台发来的「申请已发送」）
   rejection           明确说不再推进（如 "we have decided to move forward with other candidates"）
   oa_invite           邀请做在线测评 / coding challenge / take-home
   interview_invite    邀请参加面试或电话沟通
@@ -65,6 +66,7 @@ SYSTEM = """你是求职邮件分类器。判断一封邮件属于哪一类。
 - 只要邮件在邀请你安排时间、参加面试或测评，就**不是** rejection——
   哪怕里面出现 unfortunately（比如 "unfortunately that slot is taken, how about Thursday"）。
 - 拿不准时降低 confidence，不要硬判。
+- company 和 role_hint 照邮件原文抄：不翻译、不补全、不猜。投递表会拿它们建档，原文里没有的名字会被丢掉。
 
 日期：dates 里只抄原文，**不要换算时区，不要把 "next Tuesday" 换成具体日期**。
 

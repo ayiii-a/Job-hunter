@@ -50,7 +50,7 @@ CREATE INDEX IF NOT EXISTS idx_contacts_company ON contacts(company_id);
 CREATE TABLE IF NOT EXISTS jobs (
     id                INTEGER PRIMARY KEY,
     company_id        INTEGER REFERENCES companies(id) ON DELETE SET NULL,
-    source            TEXT    NOT NULL,  -- greenhouse | lever | ashby | manual
+    source            TEXT    NOT NULL,  -- greenhouse | lever | ashby | manual | email（从邮件自动建档）
     external_id       TEXT    NOT NULL,  -- 源站的岗位 id
     title             TEXT    NOT NULL,
     location          TEXT,
@@ -190,6 +190,7 @@ CREATE TABLE IF NOT EXISTS emails (
     message_id            TEXT,
     from_domain           TEXT,
     role_hint             TEXT,
+    company_hint          TEXT,        -- 分类器从邮件里抽的公司名（原文，未校验）；建档前要过 clean_name
     summary               TEXT,
     dates_json            TEXT NOT NULL DEFAULT '[]',
     links_json            TEXT NOT NULL DEFAULT '[]',

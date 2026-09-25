@@ -905,6 +905,12 @@ def cmd_board(args: argparse.Namespace) -> int:
               f"{(r.status or ''):<15}{(r.applied_at or '')[:10]:<12}"
               f"{r.applied_via:<14}{r.referral}")
 
+    mail = [r for r in rows if r.last_email]
+    if mail:
+        print("\n最新邮件（分类器写的摘要）")
+        for r in mail:
+            print(f"  #{r.application_id} {r.company[:14]} — {r.last_email[:90]}")
+
     todo = [r for r in rows if r.next_step]
     if todo:
         print("\n下一步（规则算的，不是猜的）")
@@ -1078,7 +1084,12 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
         if not args.no_fetch:
             fetched, new = mp.ingest(conn, MailReader(), since_days=args.since_days)
             _ok(f"拉取 {fetched} 封，新增 {new} 封（只读：EXAMINE + BODY.PEEK，不会把邮件标成已读）")
-        rep = mp.process_pending(conn, limit=args.limit)
+        limit = args.limit
+        if args.requeue:
+            n = mp.requeue_pending(conn)
+            limit = max(limit, n + limit)
+            _ok(f"放回待处理 {n} 封（队列里的，按现在的规则重新分类、重新判；确认过、驳回过的不动）")
+        rep = mp.process_pending(conn, limit=limit)
     except (MailError, MissingAPIKey) as exc:
         if not args.no_fetch:
             mp.record_sweep(conn, fetched=fetched, new=new, error=str(exc))
@@ -1091,7 +1102,7 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
     conn.close()
 
     print(f"  预过滤丢弃 {rep.filtered} · 分类 {rep.classified} · 自动写入 {rep.auto_applied}"
-          f" · 进人工队列 {rep.queued} · 忽略 {rep.ignored}")
+          f"（其中新建投递 {rep.created}）· 进人工队列 {rep.queued} · 忽略 {rep.ignored}")
     for e in rep.errors:
         _warn(e)
     if rep.alerts:
@@ -1099,7 +1110,8 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
         _err(f"{len(rep.alerts)} 封需要你尽快处理：")
         for a in rep.alerts:
             where = f"{a.get('company') or '?'} — {a.get('job_title') or '未匹配'}"
-            print(f"      #{a['email_id']} [{a.get('type')}] {where}")
+            done = "已记进投递表" if a.get("action") in ("auto_apply", "create") else "待你确认"
+            print(f"      #{a['email_id']} [{a.get('type')}] {where} · {done}")
         if args.push_alerts:
             # 确定性推送：不经过模型，文本只含库里的字段（mail/pipeline.py::alert_text）
             res = notify.send(mp.alert_text(rep.alerts))
@@ -1132,7 +1144,8 @@ def cmd_mail_queue(args: argparse.Namespace) -> int:
         for d in db.load_json(r["dates_json"]):
             print(f"    日期原文：「{d.get('original')}」{('— ' + d['meaning']) if d.get('meaning') else ''}")
         print(f"    为什么进队列：{r['reason']}")
-    print("\n确认：agent mail accept <id> [--application <投递id>]   驳回：agent mail dismiss <id>")
+    print("\n确认：agent mail accept <id> [--application <投递id> | --create [--company 公司] [--role 岗位]]"
+          "   驳回：agent mail dismiss <id>")
     print("看链接和全文：agent mail show <id>")
     return 0
 
@@ -1169,7 +1182,8 @@ def cmd_mail_accept(args: argparse.Namespace) -> int:
     conn = db.connect()
     db.init_db(conn)
     try:
-        out = mp.accept(conn, args.email_id, application_id=args.application)
+        out = mp.accept(conn, args.email_id, application_id=args.application, create=args.create,
+                        company=args.company, role=args.role)
     except ValueError as exc:
         conn.close()
         _err(str(exc))
@@ -1352,6 +1366,8 @@ def build_parser() -> argparse.ArgumentParser:
     msw.add_argument("--since-days", type=int, default=14)
     msw.add_argument("--limit", type=int, default=60, help="本次最多分类几封（控制成本）")
     msw.add_argument("--no-fetch", action="store_true", help="不拉新邮件，只处理库里还没处理的")
+    msw.add_argument("--requeue", action="store_true",
+                     help="把还在人工队列里的邮件按现在的规则重新处理（确认过、驳回过的不动）")
     msw.add_argument("--push-alerts", action="store_true",
                      help="有面试邀请 / OA / offer 时推到 Discord。确定性推送，不经过模型；给定时任务用")
     msw.set_defaults(func=cmd_mail_sweep)
@@ -1362,6 +1378,9 @@ def build_parser() -> argparse.ArgumentParser:
     mac = mlsub.add_parser("accept", help="确认队列里的一封（面试邀请等只有你能确认）")
     mac.add_argument("email_id", type=int)
     mac.add_argument("--application", type=int, help="没匹配上时手动指定投递 id")
+    mac.add_argument("--create", action="store_true", help="表里没有这条投递：按邮件新建一条")
+    mac.add_argument("--company", help="配合 --create：公司名（默认取分类器从邮件里抽的）")
+    mac.add_argument("--role", help="配合 --create：岗位名（默认取分类器从邮件里抽的）")
     mac.set_defaults(func=cmd_mail_accept)
     mdi = mlsub.add_parser("dismiss", help="驳回队列里的一封")
     mdi.add_argument("email_id", type=int)

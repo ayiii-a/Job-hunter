@@ -273,8 +273,9 @@ def _mark_missing(
 
     用计数而不是「一次没看到就下架」，是为了容忍接口偶发的不完整返回。
     """
+    # 从邮件建档的岗位（source='email'）本来就不在 ATS 列表里，不拿它们算缺席
     rows = conn.execute(
-        "SELECT id, external_id FROM jobs WHERE company_id = ? AND is_active = 1",
+        "SELECT id, external_id FROM jobs WHERE company_id = ? AND is_active = 1 AND source != 'email'",
         (company["id"],),
     ).fetchall()
 

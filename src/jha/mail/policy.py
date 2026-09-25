@@ -1,8 +1,20 @@
 """状态更新策略：**按误判代价分级，不是按分类难度。** 纯函数。
 
-    confirmation   自动写 —— 误判代价几乎为零
-    rejection      自动写 —— events 追加式，误判可以追加更正事件修回来
-    oa / interview / offer   **永远人工确认** —— 误判代价高且不可逆（错过面试）
+    confirmation / rejection        自动写 —— events 追加式，误判可以追加更正事件修回来
+    oa_invite / interview_invite    自动写，并且推送提醒 —— 状态记错了能纠正，要紧的是你别错过
+    scheduling                      记一条中性事件，推送（要你回复）
+    offer                           **人工确认** —— 量少、误判代价高，而且 offer 诈骗专挑应届生
+
+## 表里没有这条投递时：新建
+
+你在 LinkedIn、公司官网投的岗位也会来信，表里要有它们。所以确认信、拒信、面试、OA
+对不上任何投递时，会新建一条。但凭一封邮件建档，比更新已有记录多两个条件：
+
+  1. 发件方可信：登记过的公司域名、招聘系统（Greenhouse 等）、求职平台（LinkedIn 等）。
+     发件域名随便什么的，建档前要你看一眼——钓鱼信最爱冒充招聘方
+  2. 认得出是哪家公司
+
+两个条件的默认值都是 False：调用方不说清楚，就不建档。
 
 ## 最贵的那个错误单独设防
 
@@ -33,8 +45,14 @@ STATUS_EVENT: dict[str, str] = {
     "scheduling": "scheduling",
 }
 
-ALWAYS_HUMAN = frozenset({"oa_invite", "interview_invite", "offer"})
-AUTO_OK = frozenset({"confirmation", "rejection"})
+#: 需要你动手的类型：不管最后怎么处理，都推送提醒
+ACTION_TYPES = frozenset({"oa_invite", "interview_invite", "offer", "scheduling"})
+
+#: 表里对不上投递时，可以凭这封邮件新建一条的类型
+CREATABLE = frozenset({"confirmation", "rejection", "oa_invite", "interview_invite"})
+
+#: 永远人工确认。offer 诈骗专挑应届生和 F-1：假 offer 会要你交钱、先买设备、报 SSN
+ALWAYS_HUMAN = frozenset({"offer"})
 
 INVITE_SIGNALS = re.compile(
     r"(?i)("
@@ -49,26 +67,35 @@ INVITE_SIGNALS = re.compile(
 
 @dataclass(frozen=True)
 class Decision:
-    action: str               # auto_apply | queue | record_only | ignore
+    action: str               # auto_apply | create | queue | record_only | ignore
     event_type: str | None
     reason: str
     alert: bool = False
 
 
-def decide(*, ctype: str, confidence: float, match_status: str, text: str) -> Decision:
+def decide(
+    *, ctype: str, confidence: float, match_status: str, text: str,
+    trusted_sender: bool = False, company_known: bool = False,
+) -> Decision:
+    """reason 会进 agent 看得到的队列——只能是我们自己写的字，不能拼邮件里的内容。"""
     if ctype == "other":
         return Decision("ignore", None, "和求职无关")
     if ctype == "recruiter_outreach":
         return Decision("record_only", None, "招聘方主动联系，不改任何状态")
 
     event = STATUS_EVENT.get(ctype)
+    alert = ctype in ACTION_TYPES
+    if event is None:
+        return Decision("queue", None, "未归类的情况，交给人", alert=alert)
 
     if ctype in ALWAYS_HUMAN:
-        return Decision("queue", event, f"{ctype} 误判代价高且不可逆——永远人工确认", alert=True)
+        return Decision("queue", event, "offer 永远人工确认：量少、误判代价高，而且 offer 诈骗专挑应届生",
+                        alert=True)
 
     if ctype == "rejection":
         hit = INVITE_SIGNALS.search(text or "")
         if hit:
+            # 命中的只可能是上面正则里的固定词，不会把邮件里的任意文字带进 reason
             return Decision(
                 "queue", event,
                 f"判成了拒信，但正文里有邀请信号「{hit.group(0)}」——"
@@ -77,15 +104,29 @@ def decide(*, ctype: str, confidence: float, match_status: str, text: str) -> De
             )
 
     if confidence < AUTO_CONFIDENCE:
-        return Decision("queue", event, f"置信度 {confidence:.2f} 低于 {AUTO_CONFIDENCE}",
-                        alert=ctype == "scheduling")
-    if match_status != "exact":
-        return Decision("queue", event, f"匹配不到唯一的投递记录（{match_status}）",
-                        alert=ctype == "scheduling")
+        return Decision("queue", event, f"置信度 {confidence:.2f} 低于 {AUTO_CONFIDENCE}", alert=alert)
 
-    if ctype == "scheduling":
-        return Decision("auto_apply", event, "排期邮件：记一条中性事件、不改状态，但需要你回复",
-                        alert=True)
-    if ctype in AUTO_OK:
+    if match_status == "exact":
+        if ctype == "scheduling":
+            return Decision("auto_apply", event, "排期邮件：记一条中性事件、不改状态，但需要你回复",
+                            alert=True)
+        if ctype in ("oa_invite", "interview_invite"):
+            return Decision("auto_apply", event, "已更新投递状态并推送提醒；记错了可以追加更正事件",
+                            alert=True)
         return Decision("auto_apply", event, "低代价、可追加事件纠正——自动写入，事后抽查")
-    return Decision("queue", event, "未归类的情况，交给人")
+
+    if match_status == "ambiguous":
+        return Decision("queue", event, "这家公司有几条投递，分不出是哪一条", alert=alert)
+
+    # 表里对不上任何投递（none / no_application）
+    if ctype not in CREATABLE:
+        return Decision("queue", event, "对不上任何投递记录", alert=alert)
+    if not company_known:
+        return Decision("queue", event, "认不出是哪家公司，没法建档", alert=alert)
+    if not trusted_sender:
+        return Decision(
+            "queue", event,
+            "发件方不是登记过的公司域名、招聘系统或求职平台——钓鱼信最爱冒充招聘方，你确认后再建档",
+            alert=alert,
+        )
+    return Decision("create", event, "表里还没有这条投递，新建一条（你在别处投的也记进来）", alert=alert)
