@@ -1134,6 +1134,50 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_remind(args: argparse.Namespace) -> int:
+    from .agent import MissingAPIKey
+    from .agent.client import BudgetExceeded
+    from .mail import tasks
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        if args.remind_cmd == "done":
+            try:
+                out = tasks.mark_done(conn, args.email_id)
+            except ValueError as exc:
+                _err(str(exc))
+                return 1
+            if not out["marked"]:
+                _warn(f"邮件 #{args.email_id} 早就标过了")
+            else:
+                _ok(f"标了 {out['marked']} 封" + (f"，投递上记了一条 {out['event']}" if out["event"] else ""))
+            return 0
+        try:
+            n = tasks.extract_pending(conn)
+            if n:
+                _ok(f"新提取了 {n} 封邮件的截止时间")
+        except (MissingAPIKey, BudgetExceeded) as exc:
+            _warn(f"这次没能提取截止时间（{exc}），先用已有的")
+        items = tasks.pending(conn)
+    finally:
+        conn.close()
+
+    if not items:
+        _ok("没有待办")
+        return 0
+    text = tasks.reminder_text(items)
+    print(text)
+    if args.no_push:
+        return 0
+    res = notify.send(text)
+    if not res.sent:
+        _err(f"推送失败：{res.detail}")
+        return 1
+    _ok("已推送到 Discord")
+    return 0
+
+
 def cmd_mail_queue(args: argparse.Namespace) -> int:
     from .mail import pipeline as mp
 
@@ -1382,6 +1426,13 @@ def build_parser() -> argparse.ArgumentParser:
     msw.add_argument("--push-alerts", action="store_true",
                      help="有面试邀请 / OA / offer 时推到 Discord。确定性推送，不经过模型；给定时任务用")
     msw.set_defaults(func=cmd_mail_sweep)
+
+    rm = sub.add_parser("remind", help="待办提醒：没做完、没过期的 OA / 面试等，按截止时间排，推到 Discord")
+    rm.add_argument("--no-push", action="store_true", help="只在终端打印，不推送")
+    rm.set_defaults(func=cmd_remind)
+    rmsub = rm.add_subparsers(dest="remind_cmd")
+    rmd = rmsub.add_parser("done", help="标记一件待办做完了（同一条投递的同类邮件一起标）")
+    rmd.add_argument("email_id", type=int)
     mlsub.add_parser("queue", help="人工确认队列").set_defaults(func=cmd_mail_queue)
     msh = mlsub.add_parser("show", help="看一封邮件的全文和链接")
     msh.add_argument("email_id", type=int)

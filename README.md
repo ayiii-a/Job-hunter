@@ -198,6 +198,7 @@ Each file has a matching `*.example.yaml` that serves as the template and field 
 | `agent board` | Tracking board, next-step suggestions, missing-confirmation alerts |
 | `agent mail sweep` | Fetch and process new email (read-only). `--push-alerts` pushes messages that need action; `--requeue` re-runs messages still in the review queue under the current rules |
 | `agent mail queue` / `accept <id>` / `dismiss <id>` | Human review queue. `accept --create` records an application that isn't in the table yet (`--company` / `--role` to override the names) |
+| `agent remind` / `remind done <email_id>` | Everything you still need to do — OAs, interviews, scheduling replies, offers — that isn't done and hasn't passed its deadline, sorted by deadline with the time left and pushed to Discord (`--no-push` prints only). `done` marks an item finished |
 
 **Agent and automation**
 
@@ -225,9 +226,12 @@ Time-sensitive checks bypass the model entirely and run as deterministic command
 ```bash
 agent mail sweep --push-alerts                # push when an interview invite or similar needs action
 agent fetch --analyze 30 --push-recommended   # fetch, queue analysis, push new recommendations
+agent remind                                  # pending OAs / interviews, sorted by deadline
 ```
 
 If no mail check has succeeded for more than 6 hours, it is reported as stale — when detection silently stops, all you would otherwise see is "no interview invites lately".
+
+`agent remind` asks a stronger model for each action item's task name and deadlines, then checks every date deterministically: the original wording must appear in the email, any month/day or weekday it names must agree with the converted date, and the date must fall within 180 days of the email. A date that fails is shown as its original wording with no countdown — a wrong countdown is worse than none. Unlike the alert pushes, this push carries text derived from the email (summary, task name, date wording); links and addresses are stripped first. It pushes the whole list every run, so once or twice a day is enough.
 
 **Optional: the OpenClaw shell.** It adds always-on running and a read-only query entry point from your phone; it is not a new security boundary. `agent openclaw config` generates config fragments and cron commands from `schedules.yaml`, and `agent openclaw verify` checks that the config hasn't been loosened (sandboxing, tool allow-lists, gateway binding, who may send DMs, and more — any failed check fails the command). Deployment steps are in §3.7 of the design doc.
 

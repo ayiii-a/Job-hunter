@@ -191,6 +191,8 @@ CREATE TABLE IF NOT EXISTS emails (
     from_domain           TEXT,
     role_hint             TEXT,
     company_hint          TEXT,        -- 分类器从邮件里抽的公司名（原文，未校验）；建档前要过 clean_name
+    task_json             TEXT,        -- 待办邮件的任务名和时间（核对过的），agent remind 用；NULL = 还没抽
+    done_at               TEXT,        -- 你标了「做完了」的时间（agent remind done）
     summary               TEXT,
     dates_json            TEXT NOT NULL DEFAULT '[]',
     links_json            TEXT NOT NULL DEFAULT '[]',
