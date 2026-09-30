@@ -252,3 +252,37 @@ def test_requeue_reprocesses_only_what_is_still_pending(conn):
     assert rep.classified == 1 and len(fc.calls) == 1
     assert conn.execute("SELECT review_status FROM emails WHERE id = ?", (offer,)).fetchone()[0] == "dismissed"
 
+
+# ---------------------------------------------------------------------------
+# 真实数据里撞到的：占位记录重复、岗位名被误拦
+# ---------------------------------------------------------------------------
+
+def test_role_named_later_fills_in_the_placeholder_instead_of_a_duplicate(conn):
+    """实测：先来一封不写岗位的 OA 建了占位记录，后来的确认信写了岗位，就多出一条重复的。"""
+    sweep(conn, says(type="oa_invite", company="Netic", role_hint=""),
+          frm="Netic <no-reply@greenhouse-mail.io>", subject="Netic assessment",
+          body="Netic invites you to complete an assessment.")
+    rep = sweep(conn, says(type="confirmation", company="Netic", role_hint="Full-Stack Software Engineer (Product)"),
+                frm="Netic <no-reply@greenhouse-mail.io>", subject="Thanks for applying to Netic",
+                body="We received your application for Full-Stack Software Engineer (Product).")
+    assert rep.created == 0
+    rows = conn.execute(
+        "SELECT a.status, j.title FROM applications a JOIN jobs j ON j.id = a.job_id "
+        "JOIN companies c ON c.id = j.company_id WHERE c.name = 'Netic'").fetchall()
+    assert [(r["status"], r["title"]) for r in rows] == [("oa", "Full-Stack Software Engineer (Product)")]
+
+
+def test_fetched_job_titles_are_never_renamed(conn):
+    assert not tracking.fill_unknown_role(conn, 1, "Something Else")
+    assert conn.execute("SELECT title FROM jobs WHERE id = 1").fetchone()["title"] == "Applied AI Engineer"
+
+
+@pytest.mark.parametrize("title", [
+    "Software Engineer, Early Career — Immediate Start",
+    "AI Research Scientist, New Grad – Agents & Reinforcement Learning",
+    "Engineering Intern - Supply Chain Data, AI and Business Intelligence (Spring 2027 Co-op)",
+    "2027 Summer Intern, MS/PhD, Machine Learning Engineer - Simulator Realism and Autonomy Evaluation",
+])
+def test_real_titles_with_dashes_or_many_words_are_accepted(title):
+    """实测被误拦的真实岗位名：破折号、14 个词、超过 80 字。"""
+    assert pipeline.clean_name(title, title, **pipeline.ROLE_LIMITS) == title

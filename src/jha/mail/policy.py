@@ -10,8 +10,9 @@
 你在 LinkedIn、公司官网投的岗位也会来信，表里要有它们。所以确认信、拒信、面试、OA
 对不上任何投递时，会新建一条。但凭一封邮件建档，比更新已有记录多两个条件：
 
-  1. 发件方可信：登记过的公司域名、招聘系统（Greenhouse 等）、求职平台（LinkedIn 等）。
-     发件域名随便什么的，建档前要你看一眼——钓鱼信最爱冒充招聘方
+  1. 发件方可信：登记过的公司域名、招聘系统（Greenhouse 等）、求职平台（LinkedIn 等），
+     或者发件域名就是邮件里说的那家公司的（prefilter.domain_belongs_to）。
+     其余的建档前要你看一眼——钓鱼信最爱冒充招聘方
   2. 认得出是哪家公司
 
 两个条件的默认值都是 False：调用方不说清楚，就不建档。
@@ -26,6 +27,11 @@
 不选裸的 "interview"。因为「Thank you for interviewing with us... unfortunately」
 是最常见的面试后拒信——把它们全扔进人工队列，队列很快就会被你无视，
 那这道防线等于不存在。（和 verify.py 日期误报是同一个教训：狼来了的检查不如没有。）
+
+即便如此，实测命中的多半还是拒信（"we invite you to apply for future roles"、
+"we will not be moving your application forward"）。所以命中之后管线会换更强的模型单独复核
+（classify.review_rejection）：复核明确说没有下一步、而且引用的拒绝原话确实在邮件里，
+才按拒信写入（invite_cleared）。复核说有、说不清、出错，都照旧进人工队列。
 """
 
 from __future__ import annotations
@@ -75,7 +81,7 @@ class Decision:
 
 def decide(
     *, ctype: str, confidence: float, match_status: str, text: str,
-    trusted_sender: bool = False, company_known: bool = False,
+    trusted_sender: bool = False, company_known: bool = False, invite_cleared: bool = False,
 ) -> Decision:
     """reason 会进 agent 看得到的队列——只能是我们自己写的字，不能拼邮件里的内容。"""
     if ctype == "other":
@@ -92,9 +98,12 @@ def decide(
         return Decision("queue", event, "offer 永远人工确认：量少、误判代价高，而且 offer 诈骗专挑应届生",
                         alert=True)
 
+    note = ""
     if ctype == "rejection":
         hit = INVITE_SIGNALS.search(text or "")
-        if hit:
+        if hit and invite_cleared:
+            note = "；正文里的邀请信号经复核排除"
+        elif hit:
             # 命中的只可能是上面正则里的固定词，不会把邮件里的任意文字带进 reason
             return Decision(
                 "queue", event,
@@ -113,7 +122,7 @@ def decide(
         if ctype in ("oa_invite", "interview_invite"):
             return Decision("auto_apply", event, "已更新投递状态并推送提醒；记错了可以追加更正事件",
                             alert=True)
-        return Decision("auto_apply", event, "低代价、可追加事件纠正——自动写入，事后抽查")
+        return Decision("auto_apply", event, "低代价、可追加事件纠正——自动写入，事后抽查" + note)
 
     if match_status == "ambiguous":
         return Decision("queue", event, "这家公司有几条投递，分不出是哪一条", alert=alert)
@@ -126,7 +135,9 @@ def decide(
     if not trusted_sender:
         return Decision(
             "queue", event,
-            "发件方不是登记过的公司域名、招聘系统或求职平台——钓鱼信最爱冒充招聘方，你确认后再建档",
+            "发件方不是登记过的公司域名、招聘系统或求职平台，发件域名也对不上邮件里说的公司——"
+            "钓鱼信最爱冒充招聘方，你确认后再建档",
             alert=alert,
         )
-    return Decision("create", event, "表里还没有这条投递，新建一条（你在别处投的也记进来）", alert=alert)
+    return Decision("create", event, "表里还没有这条投递，新建一条（你在别处投的也记进来）" + note,
+                    alert=alert)

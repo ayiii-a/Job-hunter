@@ -33,7 +33,7 @@ from .imap import MailReader, RawEmail
 from . import match as match_mod
 from . import policy, prefilter
 from . import classify
-from ..agent.client import AgentClient, Budget
+from ..agent.client import AgentClient, Budget, BudgetExceeded, MissingAPIKey
 
 
 @dataclass
@@ -101,8 +101,13 @@ def ingest(
 #: 可信的发件方：只有它们的邮件能直接新建投递记录
 TRUSTED_CHANNELS = frozenset({"company", "ats", "board"})
 
-#: 从邮件里取、要写进表的名字只能由这些字符组成：字母数字和几种常见标点，没有链接、尖括号
-_NAME_CHARS = re.compile(r"^[\w &.,'’()/+#-]+$")
+#: 从邮件里取、要写进表的名字只能由这些字符组成：字母数字和几种常见标点（含岗位名里常见的 – —），
+#: 没有链接、尖括号
+_NAME_CHARS = re.compile(r"^[\w &.,'’()/+#–—-]+$")
+
+#: 岗位名比公司名长得多。实测的真实岗位名：
+#: 「Engineering Intern - Supply Chain Data, AI and Business Intelligence (Spring 2027 Co-op)」
+ROLE_LIMITS = {"max_words": 16, "max_len": 120}
 
 #: 分类器偶尔会把转发平台当成招聘公司
 _PLATFORM_NAMES = frozenset({
@@ -111,7 +116,7 @@ _PLATFORM_NAMES = frozenset({
 })
 
 
-def clean_name(raw: Any, source_text: str | None, *, max_words: int) -> str:
+def clean_name(raw: Any, source_text: str | None, *, max_words: int, max_len: int = 80) -> str:
     """分类器从邮件里抽的公司名 / 岗位名能不能写进表。不能就返回空串。
 
     这些名字之后会出现在推送里、出现在 agent 看得到的投递表里，而它们来自不可信的邮件。
@@ -120,7 +125,7 @@ def clean_name(raw: Any, source_text: str | None, *, max_words: int) -> str:
     source_text 传 None 表示是你亲手给的名字，不查最后一道。
     """
     s = " ".join(str(raw or "").split())
-    if not 2 <= len(s) <= 80 or len(s.split()) > max_words or not _NAME_CHARS.match(s):
+    if not 2 <= len(s) <= max_len or len(s.split()) > max_words or not _NAME_CHARS.match(s):
         return ""
     low = s.lower()
     if "http" in low or "www." in low or low in _PLATFORM_NAMES:
@@ -135,6 +140,32 @@ def _received(row: sqlite3.Row) -> datetime | None:
         return db._parse_dt(row["received_at"]) if row["received_at"] else None
     except (ValueError, TypeError):
         return None
+
+
+def _company_name(conn: sqlite3.Connection, company_id: int | None) -> str:
+    row = conn.execute("SELECT name FROM companies WHERE id = ?", (company_id,)).fetchone() if company_id else None
+    return row["name"] if row else ""
+
+
+def _rejection_cleared(
+    client: AgentClient, row: sqlite3.Row, *, budget: Budget, conn: sqlite3.Connection,
+) -> bool:
+    """复核能不能排除「这其实是邀请」。
+
+    只有复核明确说没有下一步（False，不是缺省）、而且它引用的那句话确实在邮件里，才算排除——
+    引用对不上原文，说明它没好好读，这次的结论不收。其余一律当成可能是邀请。
+    """
+    subject, body = row["subject"] or "", row["body_text"] or ""
+    try:
+        data = classify.review_rejection(client, subject=subject, from_addr=row["from_addr"] or "",
+                                         body=body, budget=budget, conn=conn, email_id=row["id"])
+    except (MissingAPIKey, BudgetExceeded):
+        raise
+    except Exception:
+        return False
+    quote = " ".join(str(data.get("quote") or "").split()).lower()
+    source = " ".join(f"{subject}\n{body}".split()).lower()
+    return data.get("asks_for_next_step") is False and len(quote) >= 10 and quote in source
 
 
 def _write_event(
@@ -176,7 +207,8 @@ def process_pending(
         return rep
 
     client = client or AgentClient()
-    budget = budget or Budget(max_llm_calls=len(todo) + 2)
+    # 每封最多两次调用：分类 + 可能的拒信复核
+    budget = budget or Budget(max_llm_calls=2 * len(todo) + 2)
 
     for r, pre in todo:
         subject, body, sender = r["subject"] or "", r["body_text"] or "", r["from_addr"] or ""
@@ -195,13 +227,21 @@ def process_pending(
         # 要从邮件里取公司名、岗位名建档时，先过确定性检查
         text = f"{sender}\n{subject}\n{body}"
         company = "" if m.company_id else clean_name(cls.get("company"), text, max_words=6)
-        role = clean_name(cls.get("role_hint"), text, max_words=12)
+        role = clean_name(cls.get("role_hint"), text, **ROLE_LIMITS)
+
+        # 没登记的公司：模型说是哪家，代码核对发件域名是不是这家的
+        named = company or _company_name(conn, m.company_id)
+        trusted = pre.channel in TRUSTED_CHANNELS or prefilter.domain_belongs_to(r["from_domain"] or "", named)
+
+        # 判成拒信、正文又有邀请信号的，换更强的模型复核一遍
+        cleared = (cls["type"] == "rejection" and bool(policy.INVITE_SIGNALS.search(f"{subject}\n{body}"))
+                   and _rejection_cleared(client, r, budget=budget, conn=conn))
 
         # 4. 按误判代价决定
         d = policy.decide(ctype=cls["type"], confidence=cls["confidence"],
                           match_status=m.status, text=f"{subject}\n{body}",
-                          trusted_sender=pre.channel in TRUSTED_CHANNELS,
-                          company_known=bool(m.company_id or company))
+                          trusted_sender=trusted, company_known=bool(m.company_id or company),
+                          invite_cleared=cleared)
 
         app_id = m.application_id
         if d.action == "create":
@@ -216,6 +256,7 @@ def process_pending(
         if d.action in ("auto_apply", "create") and d.event_type and app_id:
             event_id = _write_event(conn, r, app_id, cls["type"], d.event_type, source="email",
                                     payload={"email_id": r["id"], "confidence": cls["confidence"]})
+            tracking.fill_unknown_role(conn, app_id, role)
             rep.auto_applied += 1
         elif d.action == "queue":
             rep.queued += 1
@@ -323,8 +364,8 @@ def accept(
                 else clean_name(row["company_hint"], text, max_words=6))
         if not name:
             raise ValueError("认不出公司名——用 --company 指定")
-        title = (clean_name(role, None, max_words=12) if role
-                 else clean_name(row["role_hint"], text, max_words=12))
+        title = (clean_name(role, None, **ROLE_LIMITS) if role
+                 else clean_name(row["role_hint"], text, **ROLE_LIMITS))
         app_id = tracking.record_from_email(
             conn, company_id=None, company_name=name, title=title, occurred_at=_received(row),
             email_id=email_id, source="manual",

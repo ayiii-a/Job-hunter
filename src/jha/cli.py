@@ -943,12 +943,22 @@ def cmd_export(args: argparse.Namespace) -> int:
         _err(out.get("reason", "同步失败"))
         return 1
 
+    if args.md:
+        rows = tracking.tracking_rows(conn)
+        conn.close()
+        path = Path(args.out) if args.out else config.DATA_DIR / "tracking.md"
+        config.write_text(path, tracking.to_markdown(rows))
+        _ok(f"{len(rows)} 行 → {path}（编辑器里打开 Markdown 预览）")
+        return 0
+
     path = tracking.export_file(conn, Path(args.out) if args.out else None,
                                 delimiter="," if args.csv else "\t")
     n = len(tracking.tracking_rows(conn))
     conn.close()
     _ok(f"{n} 行 → {path}")
-    if not args.csv:
+    if args.csv:
+        print("      用 Excel 直接打开即可（带 BOM，中文不会乱码）")
+    else:
         print("      TSV 可以直接全选复制、粘进 Google Sheet 自动分列")
     print("      数据库是真相源，Sheet 只是只读视图——改 Sheet 不会回写")
     return 0
@@ -1350,6 +1360,7 @@ def build_parser() -> argparse.ArgumentParser:
     ex = sub.add_parser("export", help="导出追踪表（TSV 可直接粘进 Google Sheet）")
     ex.add_argument("--out", help="输出路径")
     ex.add_argument("--csv", action="store_true", help="用逗号分隔（默认制表符）")
+    ex.add_argument("--md", action="store_true", help="导出 Markdown 表格（默认 data/tracking.md）")
     ex.add_argument("--sheet", action="store_true", help="直接写 Google Sheet（需先配服务账号）")
     ex.set_defaults(func=cmd_export)
 

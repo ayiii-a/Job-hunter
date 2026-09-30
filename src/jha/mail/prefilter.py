@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from dataclasses import dataclass
 from typing import Any
@@ -26,14 +27,55 @@ SHARED_ATS_DOMAINS: frozenset[str] = frozenset({
     "taleo.net", "successfactors.com", "workable.com", "workablemail.com",
     "bamboohr.com", "rippling.com", "gem.com", "calendly.com", "goodtime.io",
     "hackerrank.com", "codesignal.com", "codility.com",
+    # 实测队列里被拦下的招聘系统 / HR 平台 / 测评平台
+    "paylocity.com", "applytojob.com", "jazzhr.com", "avature.net", "teamtailor.com",
+    "teamtailor-mail.com", "polymer.co", "personio.de", "personio.com", "saashr.com", "ukg.net",
+    "ultipro.com", "hirebridge.com", "hirebridgemail.com", "applicantemails.com",
+    "applyresponse.com", "oraclecloud.com", "successfactors.eu", "adp.com", "deel.com",
+    "myworkdayjobs.com", "breezy.hr", "recruitee.com", "pinpointhq.com", "paycomonline.net",
+    "hackerrankforwork.com", "coderpad.io",
 })
 
 #: 求职平台。它们发的「申请已发送」是可信的确认信，但也发大量推荐和动态——
 #: 所以不像 ATS 域名那样整域放行，只在主题像求职邮件时才放进来
 JOB_BOARD_DOMAINS: frozenset[str] = frozenset({
     "linkedin.com", "indeed.com", "indeedemail.com", "joinhandshake.com",
-    "wellfound.com", "glassdoor.com", "ziprecruiter.com",
+    "wellfound.com", "glassdoor.com", "ziprecruiter.com", "ycombinator.com",
 })
+
+#: co.uk、com.au 这类二级后缀：注册名在它左边
+_SECOND_LEVEL = frozenset({"co", "com", "org", "net", "ac", "gov", "edu"})
+
+#: 公司名里的法律后缀和通用词，比对时去掉（McKinsey & Company → mckinsey）
+_CORP_WORDS = frozenset({
+    "the", "inc", "llc", "ltd", "corp", "corporation", "co", "company", "group", "gmbh", "plc",
+    "lp", "llp",
+})
+
+
+def domain_belongs_to(sender_domain: str, company: str) -> bool:
+    """发件域名是不是这家公司的：careerhub.newyorklife.com ↔ New York Life、email.roblox.com ↔ Roblox。
+
+    给没登记过的公司建档用：分类器说是哪家公司，这里用确定性规则核对发件域名——
+    信任不交给模型，因为钓鱼信就是写来骗读信的人的，模型也是读信的人。
+
+    只比**注册名**（顶级域名左边那一段：careerhub.newyorklife.com 的 newyorklife）。子域名谁都能起——
+    拥有 evil.io 的人可以发自 stripe.com.evil.io。
+    而且只认**完全相等**：注册名 = 公司名去掉空格标点后的前几个词连起来。
+    stripe-careers.com、stripecareers.com 冒充 Stripe 都对不上——钓鱼域名最爱在公司名后面加 careers。
+    代价是 metlifecareers.com、skyworksinc.com 这类真域名也对不上，它们还是进队列。
+
+    挡不住换顶级域名的仿冒（stripe.xyz）。能接受是因为这里只决定「直接建档」还是「进队列」：
+    面试邀请不管哪种都会推送，offer 永远人工确认——漏过去的代价是表里多一条假记录。
+    ponytail: 没用公共后缀表，只认几种常见二级后缀（co.uk、com.au）
+    """
+    words = [w for w in re.findall(r"[a-z0-9]+", (company or "").lower()) if w not in _CORP_WORDS]
+    names = {"".join(words[:k]) for k in range(1, len(words) + 1)}
+    parts = (sender_domain or "").lower().strip(".").split(".")
+    if len(parts) < 2:
+        return False
+    label = parts[-3] if len(parts) >= 3 and parts[-2] in _SECOND_LEVEL else parts[-2]
+    return len(label) >= 3 and label in names
 
 SUBJECT_KEYWORDS: tuple[str, ...] = (
     "application", "applied", "applying", "interview", "assessment", "offer",

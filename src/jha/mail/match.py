@@ -12,6 +12,9 @@
 
 已知局限：jobs 表没存 requisition id，所以一家公司同名岗位投了两个时只能报 ambiguous；
 邮件里的岗位写法和表里差得太多（缩写、改名）时，会被当成新的一条。
+
+占位记录（当时的邮件没写岗位，建档时岗位名是 tracking.UNKNOWN_ROLE）和任何岗位都算对得上：
+实测先来一封不写岗位的 OA、后来的确认信写了岗位，按岗位名比对就多出一条重复的。
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ import sqlite3
 from dataclasses import dataclass, field
 
 from ..filters import _pattern
+from ..tracking import UNKNOWN_ROLE
 
 #: 岗位名短于这个长度就不拿来比——「Engineer」这种词哪条投递都沾边
 MIN_ROLE_LEN = 6
@@ -97,9 +101,11 @@ def match(
     scored = sorted(((_role_score(a["title"], hay, role), a["id"]) for a in apps), reverse=True)
     ids = [i for _, i in scored]
 
+    placeholders = [a["id"] for a in apps if a["title"] == UNKNOWN_ROLE]
+
     if len(apps) == 1:
-        # 表里岗位名太短、比不了的（没有可比的主干），只能照旧算它
-        if names_a_role and scored[0][0] == 0 and _title_variants(apps[0]["title"]):
+        # 占位记录和什么岗位都对得上；表里岗位名太短、比不了的（没有可比的主干），也只能照旧算它
+        if names_a_role and scored[0][0] == 0 and _title_variants(apps[0]["title"]) and not placeholders:
             return MatchResult(company_id=company_id, status="no_application", candidates=ids,
                                reason="这家公司只有一条投递，但邮件里写的岗位对不上它——当成新的一条")
         return MatchResult(application_id=apps[0]["id"], company_id=company_id,
@@ -110,6 +116,9 @@ def match(
         return MatchResult(application_id=best[1], company_id=company_id, status="exact",
                            candidates=ids, reason="按岗位名在邮件里定位到")
     if best[0] == 0 and names_a_role:
+        if len(placeholders) == 1:
+            return MatchResult(application_id=placeholders[0], company_id=company_id, status="exact",
+                               candidates=ids, reason="对不上已有的岗位名，记到这家公司那条当时没写岗位的投递上")
         return MatchResult(company_id=company_id, status="no_application", candidates=ids,
                            reason=f"这家公司的 {len(apps)} 条投递都对不上邮件里写的岗位——当成新的一条")
     return MatchResult(company_id=company_id, status="ambiguous", candidates=ids,

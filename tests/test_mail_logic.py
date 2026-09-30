@@ -372,3 +372,35 @@ def test_uses_the_cheap_model_and_records_provenance():
     call = fc.calls[0]
     assert call["model"] == "claude-haiku-4-5"
     assert call["purpose"] == "email_classify" and call["ref_type"] == "email" and call["ref_id"] == 9
+
+
+# ---------------------------------------------------------------------------
+# 占位记录（当时邮件没写岗位）和任何岗位都对得上
+# ---------------------------------------------------------------------------
+
+from jha.tracking import UNKNOWN_ROLE  # noqa: E402
+
+
+def test_placeholder_record_absorbs_the_next_email_that_names_a_role(conn):
+    """实测：先来一封不写岗位的 OA 建了占位记录，后来的确认信写了岗位——还是同一条，不是新投递。"""
+    conn.execute("INSERT INTO companies (name) VALUES ('Netic')")
+    conn.execute("INSERT INTO jobs (company_id, source, external_id, title) VALUES (3, 'email', '3:x', ?)",
+                 (UNKNOWN_ROLE,))
+    conn.execute("INSERT INTO applications (job_id) VALUES (4)")
+    conn.commit()
+    m = match.match(conn, from_addr="x", subject="Thanks", body="", company_id=3,
+                    role_hint="Full-Stack Software Engineer")
+    assert m.status == "exact" and m.application_id == 4
+
+
+def test_unmatched_role_goes_to_the_placeholder_not_a_new_record(conn):
+    conn.execute("INSERT INTO jobs (company_id, source, external_id, title) VALUES (2, 'email', '2:x', ?)",
+                 (UNKNOWN_ROLE,))
+    conn.execute("INSERT INTO applications (job_id) VALUES (4)")
+    conn.commit()
+    m = match.match(conn, from_addr="x", subject="Update", body="", company_id=2,
+                    role_hint="Data Scientist, Marketing")
+    assert m.status == "exact" and m.application_id == 4
+    m = match.match(conn, from_addr="x", body="", company_id=2,
+                    subject="Your application for Software Engineer, Web Products")
+    assert m.application_id == 3, "对得上已有岗位名的，照旧记到那一条"

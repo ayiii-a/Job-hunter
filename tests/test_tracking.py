@@ -210,3 +210,25 @@ def test_tracking_tool_exposes_next_step(conn):
     assert out["count"] == 1
     assert out["rows"][0]["next_step"]
     assert "daily_limit" in out
+
+
+def test_markdown_export_escapes_cells_that_would_break_the_table():
+    row = tracking.TrackingRow(application_id=1, company="A|B", title="Eng\nNew Grad", status="applied")
+    lines = tracking.to_markdown([row]).splitlines()
+    assert lines[0].startswith("| 公司 | 岗位 |") and lines[1] == "|" + "---|" * len(tracking.COLUMNS)
+    assert "A\\|B" in lines[2] and "Eng New Grad" in lines[2]
+    assert lines[2].count(" | ") == len(tracking.COLUMNS) - 1
+
+
+def test_csv_export_opens_in_excel_without_mojibake(tmp_path, monkeypatch):
+    """Excel 双击打开 CSV 时按系统编码读——不带 BOM，中文表头全是乱码。TSV 是粘贴用的，不加。"""
+    from jha import config, db
+
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    conn = db.connect(":memory:")
+    db.init_db(conn)
+    csv_path = tracking.export_file(conn, delimiter=",")
+    tsv_path = tracking.export_file(conn)
+    assert csv_path.name == "tracking.csv" and tsv_path.name == "tracking.tsv"
+    assert csv_path.read_bytes().startswith(b"\xef\xbb\xbf\xe5\x85\xac")   # BOM + 「公」
+    assert tsv_path.read_bytes().startswith("公司".encode("utf-8"))

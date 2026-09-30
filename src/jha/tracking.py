@@ -278,6 +278,22 @@ def record_from_email(
     return app_id
 
 
+def fill_unknown_role(conn: sqlite3.Connection, application_id: int, title: str) -> bool:
+    """占位记录等到后来的信写了岗位，就把岗位名补上。只改从邮件建档的占位岗位，抓来的岗位不碰。"""
+    if not title or title == UNKNOWN_ROLE:
+        return False
+    job = conn.execute(
+        "SELECT j.id, j.company_id FROM jobs j JOIN applications a ON a.job_id = j.id "
+        "WHERE a.id = ? AND j.source = 'email' AND j.title = ?", (application_id, UNKNOWN_ROLE),
+    ).fetchone()
+    if job is None:
+        return False
+    cur = conn.execute("UPDATE OR IGNORE jobs SET title = ?, external_id = ? WHERE id = ?",
+                       (title, f"{job['company_id']}:{title.lower()}", job["id"]))
+    conn.commit()
+    return cur.rowcount > 0
+
+
 # ---------------------------------------------------------------------------
 # 每日上限
 # ---------------------------------------------------------------------------
@@ -314,6 +330,16 @@ def to_delimited(rows: Iterable[TrackingRow], *, delimiter: str = "\t") -> str:
     return buf.getvalue()
 
 
+def to_markdown(rows: Iterable[TrackingRow]) -> str:
+    """Markdown 表格，编辑器预览或 GitHub 上看。单元格里的 | 和换行会弄乱表格，转义掉。"""
+    def cell(x: str) -> str:
+        return str(x or "").replace("|", "\\|").replace("\n", " ")
+
+    lines = ["| " + " | ".join(COLUMNS) + " |", "|" + "---|" * len(COLUMNS)]
+    lines += ["| " + " | ".join(cell(c) for c in r.as_cells()) + " |" for r in rows]
+    return "\n".join(lines) + "\n"
+
+
 def export_file(
     conn: sqlite3.Connection, path: Path | None = None, *,
     delimiter: str = "\t", now: datetime | None = None,
@@ -322,9 +348,14 @@ def export_file(
 
     默认用制表符：直接贴进 Google Sheet 会自动分列，不用走导入向导，
     也不会被岗位标题里的逗号搞乱。
+
+    CSV 是给 Excel 双击打开的：开头加 BOM。Excel 不带 BOM 就按系统编码读，中文全成乱码。
+    TSV 不加——它是复制粘贴用的，BOM 会变成第一格里一个看不见的字符。
     """
-    path = path or (config.DATA_DIR / "tracking.tsv")
-    config.write_text(path, to_delimited(tracking_rows(conn, now=now), delimiter=delimiter))
+    csv_ = delimiter == ","
+    path = path or (config.DATA_DIR / ("tracking.csv" if csv_ else "tracking.tsv"))
+    text = to_delimited(tracking_rows(conn, now=now), delimiter=delimiter)
+    config.write_text(path, ("\ufeff" if csv_ else "") + text)
     return path
 
 
