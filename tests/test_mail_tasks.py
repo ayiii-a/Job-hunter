@@ -89,13 +89,16 @@ def due(days, kind="deadline"):
 
 
 def mail(conn, *, app=1, ctype="oa_invite", deadlines=(), task="HackerRank assessment",
-         summary="完成 HackerRank 在线测评", received="2026-09-25 10:00:00", extracted=True, body="body"):
+         summary="完成 HackerRank 在线测评", received="2026-09-25 10:00:00", extracted=True, body="body",
+         links=()):
     n = conn.execute("SELECT COUNT(*) c FROM emails").fetchone()["c"] + 1
-    task_json = json.dumps({"task": task, "deadlines": list(deadlines)}) if extracted else None
+    task_json = (json.dumps({"v": tasks.TASK_VERSION, "task": task, "deadlines": list(deadlines)})
+                 if extracted else None)
     conn.execute(
-        "INSERT INTO emails (uid, from_addr, subject, body_text, received_at, classification, summary, "
-        "matched_application_id, task_json) VALUES (?,?,?,?,?,?,?,?,?)",
-        (f"u{n}", "no-reply@hackerrankforwork.com", "Assessment", body, received, ctype, summary, app, task_json),
+        "INSERT INTO emails (uid, from_addr, from_domain, subject, body_text, received_at, classification, "
+        "summary, matched_application_id, task_json, links_json) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+        (f"u{n}", "no-reply@hackerrankforwork.com", "hackerrankforwork.com", "Assessment", body, received,
+         ctype, summary, app, task_json, json.dumps(list(links))),
     )
     conn.commit()
     return n
@@ -213,3 +216,34 @@ def test_failed_extraction_is_retried_next_time(conn):
     mail(conn, extracted=False, body=BODY)
     assert tasks.extract_pending(conn, client=FakeExtractor(error=RuntimeError("overloaded"))) == 0
     assert conn.execute("SELECT task_json FROM emails").fetchone()[0] is None
+
+
+# ---------------------------------------------------------------------------
+# 链接：模型只给编号，网址取自邮件原文，再过域名检查
+# ---------------------------------------------------------------------------
+
+TEST_LINK = "https://www.hackerrank.com/test/abc123/login?invite=xyz"
+DUE = [{"original": "by Friday, October 2", "iso": "2026-10-02", "kind": "deadline"}]
+
+
+def test_picked_links_come_from_the_email_and_are_checked(conn):
+    mail(conn, extracted=False, body=BODY,
+         links=[TEST_LINK, "https://youtu.be/promo", "https://www.hackerrank.com/unsubscribe?u=1"])
+    tasks.extract_pending(conn, client=FakeExtractor({"task": "", "deadlines": DUE, "links": [1, 2, 9]}))
+    info = json.loads(conn.execute("SELECT task_json FROM emails").fetchone()[0])
+    assert info["links"] == [TEST_LINK] and info["links_dropped"] == 1, "youtu.be 没过检查；9 号不存在"
+    assert f"🔗 {TEST_LINK}" in tasks.reminder_text(tasks.pending(conn, now=NOW), now=NOW)
+
+
+def test_links_that_fail_the_check_leave_a_note_instead(conn):
+    mail(conn, extracted=False, body=BODY, links=["https://login-hackerrank.help/verify"])
+    tasks.extract_pending(conn, client=FakeExtractor({"task": "", "deadlines": [], "links": [1]}))
+    text = tasks.reminder_text(tasks.pending(conn, now=NOW), now=NOW)
+    assert "login-hackerrank" not in text and "没推" in text
+
+
+def test_items_extracted_by_an_older_version_are_extracted_again(conn):
+    eid = mail(conn, extracted=False, body=BODY)
+    conn.execute("UPDATE emails SET task_json = ? WHERE id = ?", (json.dumps({"task": "", "deadlines": []}), eid))
+    conn.commit()
+    assert tasks.extract_pending(conn, client=FakeExtractor({"task": "", "deadlines": []})) == 1

@@ -167,6 +167,7 @@ Each file has a matching `*.example.yaml` that serves as the template and field 
 | `agent profile check` | Validate the master resume and target profile: id uniqueness, reference integrity, leftover placeholders |
 | `agent resolve-ats <url\|name>` | Look up the ATS type and board token, verified against the live API |
 | `agent companies sync` | Sync `companies.yaml` into the database |
+| `agent companies merge <dup> <keep>` | One company recorded twice (e.g. `SS&C Technologies` / `SS&C Technologies Inc`): move its jobs and contacts over and delete the duplicate. `--yes` to apply |
 | `agent stats` | Row counts per table and application status distribution |
 | `agent status rebuild` | Recompute the status cache from events |
 | `agent export` | Export the tracking board as TSV |
@@ -196,6 +197,9 @@ Each file has a matching `*.example.yaml` that serves as the template and field 
 | `agent applied <job_id>` | Record an application you submitted yourself |
 | `agent confirm <id>` | Record that a confirmation email arrived |
 | `agent board` | Tracking board, next-step suggestions, missing-confirmation alerts |
+| `agent applications dups` | Suggest likely duplicates: placeholder records next to titled ones, near-identical titles, near-identical company names, and action emails not attached to any application |
+| `agent applications merge <a> <b>` | Merge two records of the same application: the duplicate's events are copied over, its emails re-pointed (so duplicate to-dos collapse into one), and it is hidden everywhere. Prints the plan; `--yes` applies — merges can't be undone |
+| `agent applications void <id>` | Mark a record as not an application (e.g. a talent-community sign-up); hidden everywhere, `--undo` restores |
 | `agent mail sweep` | Fetch and process new email (read-only). `--push-alerts` pushes messages that need action; `--requeue` re-runs messages still in the review queue under the current rules |
 | `agent mail queue` / `accept <id>` / `dismiss <id>` | Human review queue. `accept --create` records an application that isn't in the table yet (`--company` / `--role` to override the names) |
 | `agent remind` / `remind done <email_id>` | Everything you still need to do — OAs, interviews, scheduling replies, offers — that isn't done and hasn't passed its deadline, sorted by deadline with the time left and pushed to Discord (`--no-push` prints only). `done` marks an item finished |
@@ -231,7 +235,7 @@ agent remind                                  # pending OAs / interviews, sorted
 
 If no mail check has succeeded for more than 6 hours, it is reported as stale — when detection silently stops, all you would otherwise see is "no interview invites lately".
 
-`agent remind` asks a stronger model for each action item's task name and deadlines, then checks every date deterministically: the original wording must appear in the email, any month/day or weekday it names must agree with the converted date, and the date must fall within 180 days of the email. A date that fails is shown as its original wording with no countdown — a wrong countdown is worse than none. Unlike the alert pushes, this push carries text derived from the email (summary, task name, date wording); links and addresses are stripped first. It pushes the whole list every run, so once or twice a day is enough.
+`agent remind` asks a stronger model for each action item's task name and deadlines, then checks every date deterministically: the original wording must appear in the email, any month/day or weekday it names must agree with the converted date, and the date must fall within 180 days of the email. A date that fails is shown as its original wording with no countdown — a wrong countdown is worse than none. Unlike the alert pushes, this push carries text derived from the email: the summary, task name, date wording and the action links. Links and addresses are stripped from the summary. The action links are picked by the model from the email's own links by number, and pushed only if their domain is a known recruiting or assessment platform, the company's own domain, or an email-tracking redirect in a message from one of those. Assessment links often carry personal tokens, so keep the Discord channel private. It pushes the whole list every run, so once or twice a day is enough.
 
 **Optional: the OpenClaw shell.** It adds always-on running and a read-only query entry point from your phone; it is not a new security boundary. `agent openclaw config` generates config fragments and cron commands from `schedules.yaml`, and `agent openclaw verify` checks that the config hasn't been loosened (sandboxing, tool allow-lists, gateway binding, who may send DMs, and more — any failed check fails the command). Deployment steps are in §3.7 of the design doc.
 
@@ -249,7 +253,7 @@ If no mail check has succeeded for more than 6 hours, it is reported as stale �
 
 ### Deliberately missing capabilities
 
-Submitting applications, sending email, opening links and deleting records are not implemented, and tests assert they never get added. The review gate (`agent resume approve`) and review-queue confirmation (`agent mail accept`) exist only on the command line, out of the agent's reach.
+Submitting applications, sending email, opening links and deleting records are not implemented, and tests assert they never get added. The review gate (`agent resume approve`), review-queue confirmation (`agent mail accept`) and record merging (`agent applications merge` / `void`, `agent companies merge`) exist only on the command line, out of the agent's reach.
 
 ### Read-only email
 

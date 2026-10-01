@@ -1178,6 +1178,102 @@ def cmd_remind(args: argparse.Namespace) -> int:
     return 0
 
 
+def _print_dups(d: dict[str, Any]) -> None:
+    if not (d["companies"] or d["applications"] or d["emails"]):
+        _ok("没发现可能重复的记录")
+        return
+    if d["companies"]:
+        print("名字几乎一样的公司（先合并公司，它们下面的投递再看下面的建议）：")
+        for g in d["companies"]:
+            keep = next((c for c in g if c["ats_type"]), g[0])
+            print("  " + " / ".join(f"#{c['id']} {c['name']}" for c in g))
+            for c in g:
+                if c["id"] != keep["id"]:
+                    print(f"    agent companies merge {c['id']} {keep['id']}")
+    if d["applications"]:
+        print("\n可能重复的投递（不加 --yes 只打印计划）：")
+        for p in d["applications"]:
+            dup = p["dup"]
+            keeps = " / ".join(f"#{k['id']} {k['title'][:50]} [{k['status'] or '-'}]" for k in p["keep"])
+            print(f"  {dup['company']}：#{dup['id']} {dup['title'][:50]} [{dup['status'] or '-'}] → {keeps}"
+                  f"（{p['why']}）")
+            target = (str(p["keep"][0]["id"]) if len(p["keep"]) == 1
+                      else "<" + " 或 ".join(str(k["id"]) for k in p["keep"]) + "，要你判断>")
+            print(f"    agent applications merge {dup['id']} {target}")
+    if d["emails"]:
+        print("\n没对上投递的待办邮件：")
+        for item in d["emails"]:
+            e = item["email"]
+            print(f"  #{e['id']} [{e['classification']}] {e['company_hint'] or '?'}")
+            for a in item["candidates"]:
+                print(f"    可能是 #{a['id']} {a['company']} — {a['title'][:50]}：agent mail accept {e['id']} --application {a['id']}")
+            if not item["candidates"]:
+                print(f"    表里没有这家的投递：agent mail accept {e['id']} --create")
+
+
+def cmd_applications(args: argparse.Namespace) -> int:
+    from . import tracking
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        if args.app_cmd == "dups":
+            _print_dups(tracking.duplicate_candidates(conn))
+            return 0
+        if args.app_cmd == "void":
+            tracking.void_application(conn, args.application_id, reason=args.reason, undo=args.undo)
+            _ok(f"#{args.application_id} 已恢复" if args.undo else
+                f"#{args.application_id} 已标成不是投递，投递表、匹配、待办里都不再出现"
+                f"（agent applications void {args.application_id} --undo 恢复）")
+            return 0
+        if not args.yes:
+            p = tracking.plan_merge(conn, args.a, args.b)
+            dup, keep = p["dup"], p["keep"]
+            print(f"保留 #{keep['id']} {keep['company']} — {keep['title']} [{keep['status'] or '-'}]")
+            print(f"并入 #{dup['id']} {dup['company']} — {dup['title']} [{dup['status'] or '-'}]")
+            print(f"  抄过去 {len(p['events'])} 条事件" + (f"：{', '.join(e['type'] for e in p['events'])}"
+                                                      if p["events"] else ""))
+            print(f"  改指 {p['emails']} 封邮件（同类待办会自动合成一条）")
+            _warn(f"合并撤不回（事件只能追加）。确认无误：agent applications merge {args.a} {args.b} --yes")
+            return 0
+        out = tracking.merge_applications(conn, args.a, args.b)
+        _ok(f"#{out['merged']} 并进 #{out['kept']}：抄了 {out['events_copied']} 条事件，"
+            f"改指 {out['emails_moved']} 封邮件，当前状态 {out['status']}")
+        return 0
+    except ValueError as exc:
+        _err(str(exc))
+        return 1
+    finally:
+        conn.close()
+
+
+def cmd_companies_merge(args: argparse.Namespace) -> int:
+    from . import tracking
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        if not args.yes:
+            names = {r["id"]: r["name"] for r in conn.execute(
+                "SELECT id, name FROM companies WHERE id IN (?, ?)", (args.dup, args.keep))}
+            if len(names) < 2 or args.dup == args.keep:
+                _err("两个公司 id 要都存在、而且不同")
+                return 1
+            print(f"把 #{args.dup} {names[args.dup]} 的岗位、联系人、抓取记录挪到 #{args.keep} {names[args.keep]}，"
+                  f"再删掉 #{args.dup}")
+            _warn(f"确认无误：agent companies merge {args.dup} {args.keep} --yes")
+            return 0
+        out = tracking.merge_companies(conn, args.dup, args.keep)
+        moved = "，".join(f"{t} {n}" for t, n in out["moved"].items() if n) or "没有要挪的"
+        _ok(f"#{out['merged']} 并进 #{out['kept']}（{moved}）")
+        return 0
+    except ValueError as exc:
+        _err(str(exc))
+        return 1
+    finally:
+        conn.close()
+
+
 def cmd_mail_queue(args: argparse.Namespace) -> int:
     from .mail import pipeline as mp
 
@@ -1324,7 +1420,8 @@ def cmd_stats(args: argparse.Namespace) -> int:
         print(f"  {table:<18} {n}")
 
     rows = conn.execute(
-        "SELECT status, COUNT(*) c FROM applications GROUP BY status ORDER BY c DESC"
+        "SELECT status, COUNT(*) c FROM applications WHERE merged_into IS NULL AND voided_at IS NULL "
+        "GROUP BY status ORDER BY c DESC"
     ).fetchall()
     if rows:
         print("\n  投递状态分布")
@@ -1354,6 +1451,24 @@ def build_parser() -> argparse.ArgumentParser:
     cosub.add_parser("sync", help="companies.yaml -> 数据库").set_defaults(
         func=cmd_companies_sync
     )
+    cm = cosub.add_parser("merge", help="同一家公司被建成了两条：挪到保留的那条，删掉重复的（加 --yes 执行）")
+    cm.add_argument("dup", type=int, help="重复的公司 id（会被删掉）")
+    cm.add_argument("keep", type=int, help="保留的公司 id")
+    cm.add_argument("--yes", action="store_true", help="确认执行")
+    cm.set_defaults(func=cmd_companies_merge)
+
+    apps = sub.add_parser("applications", help="投递记录：找重复、合并、标记不是投递")
+    apsub = apps.add_subparsers(dest="app_cmd", required=True)
+    apsub.add_parser("dups", help="列出可能重复的投递、公司和没对上投递的待办邮件（只给建议）")
+    amg = apsub.add_parser("merge", help="合并两条重复的投递（默认只打印计划，加 --yes 执行；撤不回）")
+    amg.add_argument("a", type=int)
+    amg.add_argument("b", type=int)
+    amg.add_argument("--yes", action="store_true", help="确认执行")
+    avd = apsub.add_parser("void", help="标记一条记录不是投递（比如注册人才库）；--undo 恢复")
+    avd.add_argument("application_id", type=int)
+    avd.add_argument("--reason", default="")
+    avd.add_argument("--undo", action="store_true")
+    apps.set_defaults(func=cmd_applications)
 
     st = sub.add_parser("status", help="投递状态")
     stsub = st.add_subparsers(dest="sub", required=True)

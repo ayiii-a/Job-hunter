@@ -177,3 +177,32 @@ def test_policy_needs_the_review_to_clear_the_signal():
     kw = dict(ctype="rejection", confidence=0.95, match_status="exact", text="We invite you to apply again.")
     assert policy.decide(**kw).action == "queue"
     assert policy.decide(**kw, invite_cleared=True).action == "auto_apply"
+
+
+# ---------------------------------------------------------------------------
+# 推送里的链接（实测待办邮件里的域名）
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("url, sender, company, domains", [
+    ("https://screen-ide.coderpad.io/x", "coderpad.io", "Abridge", ()),
+    ("http://url3362.raydar.xyz/ls/click?upn=x", "raydar.xyz", "Raydar", ()),
+    ("https://track.pstmrk.it/3s/abc", "hackerrankforwork.com", "Snowflake", ()),
+    ("https://u21660302.ct.sendgrid.net/ls/click?x", "email.roblox.com", "Roblox", ()),
+    ("https://app.wellsuited.com/assess", "myworkday.com", "Houlihan Lokey", ()),
+    ("https://careers.snowflake.com/x", "ashbyhq.com", "Snowflake", ()),
+    ("https://hl.com/careers", "myworkday.com", "Houlihan Lokey", ("hl.com",)),
+])
+def test_links_on_recruiting_platforms_or_the_company_own_domain_pass(url, sender, company, domains):
+    assert prefilter.link_allowed(url, sender_domain=sender, company=company, company_domains=domains)
+
+
+@pytest.mark.parametrize("url, sender, company", [
+    ("https://track.pstmrk.it/3s/abc", "evil.io", "Stripe"),          # 跳转链接：发件方不可信就不放
+    ("https://stripe-login.com/verify", "stripe.com", "Stripe"),
+    ("https://youtu.be/x", "akunacapital.com", "Akuna Capital"),
+    ("https://akunacapital.teachable.com/x", "akunacapital.com", "Akuna Capital"),   # 别家平台上的子域名
+    ("javascript:alert(1)", "hackerrank.com", "Snowflake"),
+    ("https://www.hackerrank.com/unsubscribe?u=1", "hackerrank.com", "Snowflake"),
+])
+def test_other_links_do_not(url, sender, company):
+    assert not prefilter.link_allowed(url, sender_domain=sender, company=company)

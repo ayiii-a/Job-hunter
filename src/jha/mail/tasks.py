@@ -9,8 +9,9 @@ sweep 只管分类和记表；这里管「还有什么要你做、什么时候�
     pending          还没做完、没过截止时间、投递也没结束的，按截止时间排
     reminder_text    推送文本
 
-推送里有从邮件派生的文字（摘要、任务名、时间原文）——这是有意的，你要看。
-链接和邮箱地址先剥掉、长度截断；notify 那边 @ 和链接预览都关着。
+推送里有从邮件派生的文字（摘要、任务名、时间原文、要点的链接）——这是有意的，你要看。
+摘要里的链接和邮箱地址先剥掉、长度截断；要点的链接由模型按编号从邮件原文里挑，
+再过域名检查（prefilter.link_allowed）；notify 那边 @ 和链接预览都关着。
 """
 
 from __future__ import annotations
@@ -18,18 +19,24 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 
 from .. import db
 from ..agent.client import AgentClient, Budget, BudgetExceeded, MissingAPIKey
-from . import classify
+from . import classify, prefilter
 from .pipeline import _received, clean_name
 from .policy import ACTION_TYPES
 
 TYPE_LABEL = {"oa_invite": "OA", "interview_invite": "面试", "scheduling": "约时间", "offer": "offer"}
 KIND_LABEL = {"deadline": "截止", "event": "时间", "other": "日期"}
+
+#: 抽取结果的版本。加了新字段（比如链接）就 bump，旧的待办下次提醒时重新抽
+TASK_VERSION = 2
+
+#: 给模型看的链接最多几个（签名、页脚里的链接可能很多）
+MAX_LINKS = 40
 
 #: 没写截止时间的待办，收到多少天后不再提醒（做完了可以提前 remind done）
 NO_DEADLINE_DAYS = 14
@@ -128,10 +135,15 @@ def extract_pending(
     conn: sqlite3.Connection, *, client: AgentClient | None = None,
     budget: Budget | None = None, limit: int = 30,
 ) -> int:
-    """给还没抽过的待办邮件抽任务名和时间。返回这次抽了几封；出错的下次再试。"""
-    where, params = _todo_sql("AND e.task_json IS NULL")
-    rows = conn.execute(f"SELECT e.* FROM emails e WHERE {where} ORDER BY e.received_at DESC LIMIT ?",
-                        (*params, limit)).fetchall()
+    """给还没抽过（或者按旧版本抽的）待办邮件抽任务名、时间和链接。返回这次抽了几封；出错的下次再试。"""
+    where, params = _todo_sql(
+        "AND (e.task_json IS NULL OR COALESCE(json_extract(e.task_json, '$.v'), 1) < ?)")
+    rows = conn.execute(
+        "SELECT e.*, co.name AS company, co.email_domains_json AS company_domains FROM emails e "
+        "LEFT JOIN applications a ON a.id = e.matched_application_id "
+        "LEFT JOIN jobs j ON j.id = a.job_id LEFT JOIN companies co ON co.id = j.company_id "
+        f"WHERE {where} ORDER BY e.received_at DESC LIMIT ?", (*params, TASK_VERSION, limit),
+    ).fetchall()
     if not rows:
         return 0
     client = client or AgentClient()
@@ -139,10 +151,11 @@ def extract_pending(
     done = 0
     for r in rows:
         received = _received(r)
+        links = [str(u) for u in json.loads(r["links_json"] or "[]")][:MAX_LINKS]
         try:
             data = classify.extract_task(
                 client, subject=r["subject"] or "", from_addr=r["from_addr"] or "",
-                body=r["body_text"] or "", budget=budget, conn=conn, email_id=r["id"],
+                body=r["body_text"] or "", budget=budget, conn=conn, email_id=r["id"], links=links,
                 received_at=received.astimezone().isoformat(timespec="minutes") if received else "",
             )
         except (MissingAPIKey, BudgetExceeded):
@@ -158,11 +171,38 @@ def extract_pending(
                 if item:
                     items.append(item)
         task = clean_name(data.get("task"), text, max_words=8, max_len=60)
+        kept, dropped = _pick_links(
+            data.get("links"), links, sender=r["from_domain"] or "",
+            company=r["company"] or clean_name(r["company_hint"], text, max_words=6),
+            company_domains=json.loads(r["company_domains"] or "[]"),
+        )
         conn.execute("UPDATE emails SET task_json = ? WHERE id = ?",
-                     (db.dump_json({"task": task, "deadlines": items}), r["id"]))
+                     (db.dump_json({"v": TASK_VERSION, "task": task, "deadlines": items,
+                                    "links": kept, "links_dropped": dropped}), r["id"]))
         conn.commit()
         done += 1
     return done
+
+
+def _pick_links(
+    picked: Any, links: list[str], *, sender: str, company: str, company_domains: list[str],
+) -> tuple[list[str], int]:
+    """模型只给编号，网址从邮件原文里取，再过域名检查。返回 (能推的, 挑了但没过检查的个数)。"""
+    kept: list[str] = []
+    dropped = 0
+    for i in _as_list(picked, "links")[:2]:
+        try:
+            n = int(i)
+        except (TypeError, ValueError):
+            continue
+        if not 1 <= n <= len(links) or links[n - 1] in kept:
+            continue
+        if prefilter.link_allowed(links[n - 1], sender_domain=sender, company=company,
+                                  company_domains=company_domains):
+            kept.append(links[n - 1])
+        else:
+            dropped += 1
+    return kept, dropped
 
 
 @dataclass
@@ -178,6 +218,8 @@ class Task:
     kind: str
     date_only: bool
     received: datetime | None
+    links: list[str] = field(default_factory=list)     # 做这件事要点的链接（过了域名检查）
+    links_dropped: int = 0
 
 
 def _order(t: Task) -> tuple[int, float]:
@@ -191,7 +233,8 @@ def pending(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ta
     now = now or datetime.now().astimezone()
     where, params = _todo_sql()
     rows = conn.execute(
-        "SELECT e.*, a.status AS app_status, c.name AS company, j.title AS job_title FROM emails e "
+        "SELECT e.*, a.status AS app_status, a.voided_at AS app_voided, c.name AS company, "
+        "j.title AS job_title FROM emails e "
         "LEFT JOIN applications a ON a.id = e.matched_application_id "
         "LEFT JOIN jobs j ON j.id = a.job_id LEFT JOIN companies c ON c.id = j.company_id "
         f"WHERE {where} ORDER BY e.received_at", params,
@@ -200,7 +243,7 @@ def pending(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ta
     groups: dict[tuple[Any, ...], Task] = {}
     for r in rows:
         ctype = r["classification"]
-        if r["app_status"] in _PAST[ctype]:
+        if r["app_status"] in _PAST[ctype] or r["app_voided"]:
             continue
         info = json.loads(r["task_json"]) if r["task_json"] else {}
         items = info.get("deadlines") or []
@@ -222,6 +265,7 @@ def pending(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ta
             label=info.get("task") or "", summary=_clip(r["summary"], 120),
             due=due, due_text=d.get("text") or "", kind=d.get("kind") or "other",
             date_only=bool(d.get("date_only")), received=received,
+            links=list(info.get("links") or []), links_dropped=int(info.get("links_dropped") or 0),
         )
         # 同一条投递的同类邮件（邀请、催促）合成一条，留截止时间最早的那封
         key = (r["matched_application_id"], ctype) if r["matched_application_id"] else ("email", r["id"])
@@ -268,6 +312,9 @@ def reminder_text(tasks: list[Task], *, now: datetime | None = None) -> str:
             lines.append(f"   没写截止时间{days}")
         if t.summary:
             lines.append(f"   {t.summary}")
+        lines += [f"   🔗 {url}" for url in t.links]
+        if t.links_dropped and not t.links:
+            lines.append(f"   链接的域名对不上招聘平台或这家公司，没推——在电脑上看：agent mail show {t.email_ids[0]}")
     lines += ["", "做完了：agent remind done <邮件编号>"]
     return "\n".join(lines)
 

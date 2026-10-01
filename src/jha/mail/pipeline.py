@@ -351,8 +351,10 @@ def accept(
 
     app_id = application_id or row["matched_application_id"]
     if app_id:
-        if conn.execute("SELECT 1 FROM applications WHERE id = ?", (app_id,)).fetchone() is None:
+        target = conn.execute("SELECT merged_into FROM applications WHERE id = ?", (app_id,)).fetchone()
+        if target is None:
             raise ValueError(f"没有 id 为 {app_id} 的投递记录")
+        app_id = target["merged_into"] or app_id          # 合并过的，记到保留的那条上
     elif not create:
         raise ValueError(
             f"邮件 #{email_id} 没匹配到投递记录——用 --application <id> 指定已有的一条；"

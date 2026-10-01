@@ -17,7 +17,8 @@ from __future__ import annotations
 import re
 import sqlite3
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Iterable
+from urllib.parse import urlsplit
 
 from .. import db
 
@@ -34,6 +35,9 @@ SHARED_ATS_DOMAINS: frozenset[str] = frozenset({
     "applyresponse.com", "oraclecloud.com", "successfactors.eu", "adp.com", "deel.com",
     "myworkdayjobs.com", "breezy.hr", "recruitee.com", "pinpointhq.com", "paycomonline.net",
     "hackerrankforwork.com", "coderpad.io",
+    # 实测待办邮件里的测评 / 招聘平台
+    "wellsuited.com", "coderbyte.com", "fountain.com", "hirevue.com", "karat.com",
+    "testgorilla.com", "pymetrics.ai",
 })
 
 #: 求职平台。它们发的「申请已发送」是可信的确认信，但也发大量推荐和动态——
@@ -71,11 +75,61 @@ def domain_belongs_to(sender_domain: str, company: str) -> bool:
     """
     words = [w for w in re.findall(r"[a-z0-9]+", (company or "").lower()) if w not in _CORP_WORDS]
     names = {"".join(words[:k]) for k in range(1, len(words) + 1)}
-    parts = (sender_domain or "").lower().strip(".").split(".")
-    if len(parts) < 2:
-        return False
-    label = parts[-3] if len(parts) >= 3 and parts[-2] in _SECOND_LEVEL else parts[-2]
+    label = registered_domain(sender_domain).split(".")[0]
     return len(label) >= 3 and label in names
+
+
+def company_key(name: str) -> str:
+    """比较公司名用：小写、去标点和 Inc / Company 这类后缀（SS&C Technologies Inc → ssctechnologies）。"""
+    return "".join(w for w in re.findall(r"[a-z0-9]+", (name or "").lower()) if w not in _CORP_WORDS)
+
+
+def registered_domain(domain: str) -> str:
+    """注册名加后缀：careers.acme.com → acme.com，jobs.acme.co.uk → acme.co.uk。子域名谁都能起，只比这一段。"""
+    parts = (domain or "").lower().strip(".").split(".")
+    if len(parts) < 2:
+        return ""
+    n = 3 if len(parts) >= 3 and parts[-2] in _SECOND_LEVEL else 2
+    return ".".join(parts[-n:])
+
+
+#: 邮件服务商的点击跟踪跳转（实测：HackerRank 走 Postmark，Roblox 走 SendGrid）。
+#: 跳到哪由发件方决定，所以只在发件方本身可信时放行
+TRACKING_DOMAINS: frozenset[str] = frozenset({
+    "pstmrk.it", "sendgrid.net", "mandrillapp.com", "mailgun.org", "list-manage.com", "hubspotlinks.com",
+})
+
+_NOT_ACTION = re.compile(r"(?i)unsubscribe|opt-?out|preferences|privacy")
+
+
+def link_allowed(
+    url: str, *, sender_domain: str, company: str, company_domains: Iterable[str] = (),
+) -> bool:
+    """邮件里的一个链接能不能推给你。
+
+    推送出现在你信任的频道里，旁边还写着公司名和「OA」——钓鱼链接混进来比在邮箱里更像真的。
+    所以只放三种：招聘 / 测评平台上的；这家公司自己域名上的（含你在 companies.yaml 登记的）；
+    点击跟踪跳转，而且发件方本身是前两种。退订、隐私这类链接一律不推。
+    和 domain_belongs_to 一样挡不住换顶级域名的仿冒（stripe.xyz）。
+    """
+    url = str(url or "")
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").lower()
+    except ValueError:
+        return False
+    if parts.scheme not in ("http", "https") or not host or len(url) > 800 or _NOT_ACTION.search(url):
+        return False
+    platforms = SHARED_ATS_DOMAINS | JOB_BOARD_DOMAINS
+    registered = {registered_domain(d) for d in company_domains if d} - {""}
+
+    def ours(h: str) -> bool:
+        return (any(domain_matches(h, d) for d in platforms) or domain_belongs_to(h, company)
+                or registered_domain(h) in registered)
+
+    if ours(host):
+        return True
+    return any(domain_matches(host, d) for d in TRACKING_DOMAINS) and ours(sender_domain or "")
 
 SUBJECT_KEYWORDS: tuple[str, ...] = (
     "application", "applied", "applying", "interview", "assessment", "offer",

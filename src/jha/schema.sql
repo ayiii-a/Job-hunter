@@ -135,6 +135,8 @@ CREATE TABLE IF NOT EXISTS applications (
     applied_via          TEXT,           -- referral | company_site | ats_direct | ...
     referred_by_contact_id INTEGER REFERENCES contacts(id) ON DELETE SET NULL,
     confirmation_seen_at TEXT,           -- 24h 内没值就告警：申请可能被静默丢弃
+    merged_into          INTEGER REFERENCES applications(id),  -- 重复记录合并进了哪条；非空就不再出现在任何视图里
+    voided_at            TEXT,           -- 你标了「不是投递」（比如注册人才库）；可以撤销
     notes                TEXT,
     created_at           TEXT NOT NULL DEFAULT (datetime('now')),
     UNIQUE (job_id)

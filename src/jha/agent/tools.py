@@ -246,7 +246,8 @@ def list_applications(conn: sqlite3.Connection, status: str | None = None) -> li
     sql = (
         "SELECT a.id, c.name AS company, j.title, a.status, a.applied_at, a.applied_via, "
         "a.confirmation_seen_at, a.notes FROM applications a "
-        "JOIN jobs j ON j.id = a.job_id LEFT JOIN companies c ON c.id = j.company_id WHERE 1=1 "
+        "JOIN jobs j ON j.id = a.job_id LEFT JOIN companies c ON c.id = j.company_id "
+        "WHERE a.merged_into IS NULL AND a.voided_at IS NULL "
     )
     params: list[Any] = []
     if status:

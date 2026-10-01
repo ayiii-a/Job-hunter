@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import csv
 import io as _io
+import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -142,6 +143,7 @@ def tracking_rows(conn: sqlite3.Connection, *, now: datetime | None = None) -> l
         LEFT JOIN contacts ct ON ct.id = a.referred_by_contact_id
         LEFT JOIN job_analysis an ON an.job_id = j.id
         LEFT JOIN resume_versions rv ON rv.id = a.resume_version_id
+        WHERE a.merged_into IS NULL AND a.voided_at IS NULL
         ORDER BY a.applied_at DESC, a.id DESC
         """
     ).fetchall()
@@ -196,6 +198,7 @@ def missing_confirmations(
         "FROM applications a JOIN jobs j ON j.id = a.job_id "
         "LEFT JOIN companies c ON c.id = j.company_id "
         "WHERE a.confirmation_seen_at IS NULL AND a.applied_at IS NOT NULL "
+        "AND a.merged_into IS NULL AND a.voided_at IS NULL "
         "AND (a.status IS NULL OR a.status IN ('applied', 'ghosted')) "
         "ORDER BY a.applied_at"
     ).fetchall()
@@ -266,8 +269,15 @@ def record_from_email(
         (company_id, f"{company_id}:{title.lower()}", title),
     ).lastrowid)
 
-    existing = conn.execute("SELECT id FROM applications WHERE job_id = ?", (job_id,)).fetchone()
+    existing = conn.execute("SELECT id, merged_into, voided_at FROM applications WHERE job_id = ?",
+                            (job_id,)).fetchone()
     if existing:
+        if existing["merged_into"]:
+            return int(existing["merged_into"])           # 合并过：记到保留的那条上
+        if existing["voided_at"]:
+            # 被标成「不是投递」的那条又来了相关邮件——当它是真的，恢复
+            conn.execute("UPDATE applications SET voided_at = NULL WHERE id = ?", (existing["id"],))
+            conn.commit()
         return int(existing["id"])
     app_id = int(conn.execute(
         "INSERT INTO applications (job_id, applied_at, notes) VALUES (?, ?, ?)",
@@ -295,13 +305,210 @@ def fill_unknown_role(conn: sqlite3.Connection, application_id: int, title: str)
 
 
 # ---------------------------------------------------------------------------
+# 重复记录：合并、作废、找重复
+#
+# 合并撤不回——events 只能追加。所以 CLI 默认只打印计划，加 --yes 才执行；这些都不是 agent 的工具。
+# ---------------------------------------------------------------------------
+
+#: 还算数的投递：没被合并进别的，也没被标成「不是投递」
+ACTIVE = "a.merged_into IS NULL AND a.voided_at IS NULL"
+
+
+def _title_key(title: str) -> str:
+    """「2133859 - January 2027 - Leap Software Engineer」和「2133859 January 2027 - Leap ...」算一样。"""
+    return re.sub(r"[^a-z0-9]", "", (title or "").lower())
+
+
+def _active_app(conn: sqlite3.Connection, app_id: int) -> sqlite3.Row:
+    row = conn.execute(
+        "SELECT a.*, j.title, j.company_id, c.name AS company FROM applications a "
+        "JOIN jobs j ON j.id = a.job_id LEFT JOIN companies c ON c.id = j.company_id WHERE a.id = ?",
+        (app_id,),
+    ).fetchone()
+    if row is None:
+        raise ValueError(f"没有 id 为 {app_id} 的投递记录")
+    if row["merged_into"]:
+        raise ValueError(f"#{app_id} 已经合并进 #{row['merged_into']} 了")
+    if row["voided_at"]:
+        raise ValueError(f"#{app_id} 已经标成不是投递了（agent applications void {app_id} --undo 恢复）")
+    return row
+
+
+def plan_merge(conn: sqlite3.Connection, a: int, b: int) -> dict[str, Any]:
+    """合并两条重复的投递：算出保留哪条、要抄哪些事件、挪几封邮件。只读。
+
+    有一条是占位记录（邮件没写岗位）就保留有岗位名的那条；都有岗位名就保留后一个参数。
+    """
+    if a == b:
+        raise ValueError("两个 id 是同一条")
+    ra, rb = _active_app(conn, a), _active_app(conn, b)
+    if ra["company_id"] != rb["company_id"]:
+        raise ValueError(
+            f"#{a} 和 #{b} 属于不同的公司（{ra['company']} / {rb['company']}）。"
+            "确定是同一家，先合并公司：agent companies merge <重复的公司 id> <保留的公司 id>"
+        )
+    dup, keep = (ra, rb) if ra["title"] == UNKNOWN_ROLE or rb["title"] != UNKNOWN_ROLE else (rb, ra)
+    have = {(r["type"], r["occurred_at"]) for r in conn.execute(
+        "SELECT type, occurred_at FROM events WHERE application_id = ?", (keep["id"],))}
+    has_applied = any(t == "applied" for t, _ in have)
+    events = [
+        e for e in conn.execute(
+            "SELECT * FROM events WHERE application_id = ? ORDER BY occurred_at, id", (dup["id"],))
+        if (e["type"], e["occurred_at"]) not in have and not (e["type"] == "applied" and has_applied)
+    ]
+    emails = conn.execute("SELECT COUNT(*) c FROM emails WHERE matched_application_id = ?",
+                          (dup["id"],)).fetchone()["c"]
+    return {"dup": dup, "keep": keep, "events": events, "emails": emails}
+
+
+def merge_applications(
+    conn: sqlite3.Connection, a: int, b: int, *, now: datetime | None = None,
+) -> dict[str, Any]:
+    """执行合并。
+
+    重复那条的事件原样抄到保留的那条上（来源不变，payload 记上从哪条抄来的）；邮件改指过去——
+    同类待办按「投递 + 类型」分组，于是自动合成一条；空着的字段从重复那条补上，投递日取早的；
+    重复那条标 merged_into，各处查询都跳过它。它自己的事件原样留着，历史不丢。
+    """
+    p = plan_merge(conn, a, b)
+    dup, keep = p["dup"], p["keep"]
+    for e in p["events"]:
+        payload = {**db.load_json(e["payload_json"], {}), "merged_from_application": dup["id"],
+                   "copied_event_id": e["id"]}
+        db.append_event(conn, keep["id"], e["type"], occurred_at=db._parse_dt(e["occurred_at"]),
+                        source=e["source"], raw_ref=e["raw_ref"], payload=payload, rebuild=False)
+    conn.execute("UPDATE emails SET matched_application_id = ? WHERE matched_application_id = ?",
+                 (keep["id"], dup["id"]))
+    # 之前并进 dup 的，也一起指向 keep
+    conn.execute("UPDATE applications SET merged_into = ? WHERE merged_into = ? OR id = ?",
+                 (keep["id"], dup["id"], dup["id"]))
+
+    def earliest(x: str | None, y: str | None) -> str | None:
+        vals = [v for v in (x, y) if v]
+        return min(vals) if vals else None
+
+    conn.execute(
+        "UPDATE applications SET applied_at = ?, confirmation_seen_at = ?, "
+        "resume_version_id = COALESCE(resume_version_id, ?), applied_via = COALESCE(applied_via, ?), "
+        "referred_by_contact_id = COALESCE(referred_by_contact_id, ?), notes = ? WHERE id = ?",
+        (earliest(keep["applied_at"], dup["applied_at"]),
+         earliest(keep["confirmation_seen_at"], dup["confirmation_seen_at"]),
+         dup["resume_version_id"], dup["applied_via"], dup["referred_by_contact_id"],
+         "；".join(x for x in (keep["notes"], f"合并了 #{dup['id']}") if x), keep["id"]),
+    )
+    status = db.rebuild_status(conn, keep["id"], now=now)
+    conn.commit()
+    return {"kept": keep["id"], "merged": dup["id"], "events_copied": len(p["events"]),
+            "emails_moved": p["emails"], "status": status}
+
+
+def void_application(
+    conn: sqlite3.Connection, app_id: int, *, reason: str = "", undo: bool = False,
+) -> dict[str, Any]:
+    """标成「不是投递」（比如注册人才库的邮件建出来的）。只是隐藏，undo=True 恢复。"""
+    row = conn.execute("SELECT merged_into, notes FROM applications WHERE id = ?", (app_id,)).fetchone()
+    if row is None:
+        raise ValueError(f"没有 id 为 {app_id} 的投递记录")
+    if row["merged_into"]:
+        raise ValueError(f"#{app_id} 已经合并进 #{row['merged_into']} 了")
+    if undo:
+        conn.execute("UPDATE applications SET voided_at = NULL WHERE id = ?", (app_id,))
+    else:
+        note = "；".join(x for x in (row["notes"], f"不是投递：{reason}" if reason else "不是投递") if x)
+        conn.execute("UPDATE applications SET voided_at = datetime('now'), notes = ? WHERE id = ?",
+                     (note, app_id))
+    conn.commit()
+    return {"application_id": app_id, "voided": not undo}
+
+
+def merge_companies(conn: sqlite3.Connection, dup_id: int, keep_id: int) -> dict[str, Any]:
+    """同一家公司被建成了两条（SS&C Technologies / SS&C Technologies Inc）：
+    把指向它的岗位、联系人、抓取记录挪过去，邮件域名合在一起，删掉重复的那条。
+
+    companies.yaml 里登记过的那条（有 ATS 信息）不能当重复的删——下次 companies sync 又会建回来。
+    """
+    if dup_id == keep_id:
+        raise ValueError("两个 id 是同一家")
+    dup = conn.execute("SELECT * FROM companies WHERE id = ?", (dup_id,)).fetchone()
+    keep = conn.execute("SELECT * FROM companies WHERE id = ?", (keep_id,)).fetchone()
+    if dup is None or keep is None:
+        raise ValueError(f"没有 id 为 {dup_id if dup is None else keep_id} 的公司")
+    if dup["ats_type"] or dup["board_token"]:
+        raise ValueError(f"{dup['name']}（#{dup_id}）是 companies.yaml 里登记的，删了下次同步又会建回来。"
+                         f"反过来合并：agent companies merge {keep_id} {dup_id}")
+    moved: dict[str, int] = {}
+    for table in [r["name"] for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")]:
+        for fk in conn.execute(f"PRAGMA foreign_key_list({table})").fetchall():
+            if fk["table"] == "companies":
+                moved[table] = conn.execute(
+                    f'UPDATE {table} SET "{fk["from"]}" = ? WHERE "{fk["from"]}" = ?', (keep_id, dup_id)
+                ).rowcount
+    domains = sorted(set(db.load_json(keep["email_domains_json"])) | set(db.load_json(dup["email_domains_json"])))
+    conn.execute("UPDATE companies SET email_domains_json = ? WHERE id = ?", (db.dump_json(domains), keep_id))
+    conn.execute("DELETE FROM companies WHERE id = ?", (dup_id,))
+    conn.commit()
+    return {"kept": keep_id, "merged": dup_id, "moved": moved}
+
+
+def duplicate_candidates(conn: sqlite3.Connection) -> dict[str, list[Any]]:
+    """可能重复的东西，只给建议，合不合由你定：
+
+      companies     名字几乎一样的公司（SS&C Technologies / SS&C Technologies Inc）
+      applications  同一家公司里：占位记录配有岗位名的；岗位名去掉标点后一样的
+      emails        没对上投递的待办邮件，按公司名找可能的投递
+    """
+    from .mail.policy import ACTION_TYPES
+    from .mail.prefilter import company_key
+
+    groups: dict[str, list[sqlite3.Row]] = {}
+    for c in conn.execute("SELECT id, name, ats_type FROM companies ORDER BY id"):
+        groups.setdefault(company_key(c["name"]), []).append(c)
+    companies = [g for k, g in groups.items() if k and len(g) > 1]
+
+    apps = conn.execute(
+        "SELECT a.id, a.status, j.title, j.company_id, c.name AS company FROM applications a "
+        f"JOIN jobs j ON j.id = a.job_id LEFT JOIN companies c ON c.id = j.company_id WHERE {ACTIVE} ORDER BY a.id"
+    ).fetchall()
+    per_company: dict[int, list[sqlite3.Row]] = {}
+    for a in apps:
+        per_company.setdefault(a["company_id"], []).append(a)
+    pairs: list[dict[str, Any]] = []
+    for group in per_company.values():
+        titled = [a for a in group if a["title"] != UNKNOWN_ROLE]
+        for p in group:
+            if p["title"] == UNKNOWN_ROLE and titled:
+                pairs.append({"dup": p, "keep": titled, "why": "占位记录，当时的邮件没写岗位"})
+        seen: dict[str, sqlite3.Row] = {}
+        for a in titled:
+            k = _title_key(a["title"])
+            if k in seen:
+                pairs.append({"dup": seen[k], "keep": [a], "why": "岗位名去掉标点后一样"})
+            else:
+                seen[k] = a
+
+    types = tuple(sorted(ACTION_TYPES))
+    keys = {a["id"]: company_key(a["company"]) for a in apps}
+    emails = []
+    for e in conn.execute(
+        f"SELECT id, classification, company_hint FROM emails WHERE classification IN ({','.join('?' * len(types))}) "
+        "AND matched_application_id IS NULL AND review_status = 'pending' AND done_at IS NULL ORDER BY id", types,
+    ):
+        hint = company_key(e["company_hint"])
+        cands = [a for a in apps if len(hint) >= 3 and len(keys[a["id"]]) >= 3
+                 and (hint.startswith(keys[a["id"]]) or keys[a["id"]].startswith(hint))]
+        emails.append({"email": e, "candidates": cands})
+    return {"companies": companies, "applications": pairs, "emails": emails}
+
+
+# ---------------------------------------------------------------------------
 # 每日上限
 # ---------------------------------------------------------------------------
 
 def applied_today(conn: sqlite3.Connection, *, now: datetime | None = None) -> int:
     day = (now or datetime.now()).strftime("%Y-%m-%d")
     return conn.execute(
-        "SELECT COUNT(*) c FROM applications WHERE substr(applied_at, 1, 10) = ?", (day,)
+        "SELECT COUNT(*) c FROM applications WHERE substr(applied_at, 1, 10) = ? "
+        "AND merged_into IS NULL AND voided_at IS NULL", (day,)
     ).fetchone()["c"]
 
 

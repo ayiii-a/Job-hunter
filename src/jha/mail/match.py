@@ -89,7 +89,8 @@ def match(
 
     apps = conn.execute(
         "SELECT a.id, j.title FROM applications a JOIN jobs j ON j.id = a.job_id "
-        "WHERE j.company_id = ? ORDER BY a.applied_at DESC", (company_id,),
+        "WHERE j.company_id = ? AND a.merged_into IS NULL AND a.voided_at IS NULL "
+        "ORDER BY a.applied_at DESC", (company_id,),
     ).fetchall()
     if not apps:
         return MatchResult(company_id=company_id, status="no_application",
