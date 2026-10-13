@@ -11,7 +11,7 @@ import json
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from . import config, db, ingest, notify, profile
 from .tools import resolve_ats
@@ -899,10 +899,10 @@ def cmd_board(args: argparse.Namespace) -> int:
         _warn("还没有投递记录。投完之后：agent applied <job_id> --via referral")
         return 0
 
-    print(f"{'id':>4}  {'公司':<14}{'岗位':<34}{'状态':<15}{'投递日':<12}{'渠道':<14}内推")
+    print(f"{'id':>4}  {'公司':<14}{'岗位':<34}{'走到':<10}{'结果':<8}{'投递日':<12}{'渠道':<14}内推")
     for r in rows:
         print(f"{r.application_id:>4}  {r.company[:13]:<14}{r.title[:33]:<34}"
-              f"{(r.status or ''):<15}{(r.applied_at or '')[:10]:<12}"
+              f"{r.progress.stage:<10}{r.progress.outcome:<8}{(r.applied_at or r.started_at or '')[:10]:<12}"
               f"{r.applied_via:<14}{r.referral}")
 
     mail = [r for r in rows if r.last_email]
@@ -1099,6 +1099,10 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
             n = mp.requeue_pending(conn)
             limit = max(limit, n + limit)
             _ok(f"放回待处理 {n} 封（队列里的，按现在的规则重新分类、重新判；确认过、驳回过的不动）")
+        if args.rescreen:
+            n = mp.rescreen_filtered(conn)
+            limit = max(limit, n + limit)
+            _ok(f"以前被预过滤丢掉、按现在的规则能过的 {n} 封放回去分类")
         rep = mp.process_pending(conn, limit=limit)
     except (MailError, MissingAPIKey) as exc:
         if not args.no_fetch:
@@ -1111,8 +1115,11 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
         mp.record_sweep(conn, fetched=fetched, new=new, rep=rep)
     conn.close()
 
-    print(f"  预过滤丢弃 {rep.filtered} · 分类 {rep.classified} · 自动写入 {rep.auto_applied}"
-          f"（其中新建投递 {rep.created}）· 进人工队列 {rep.queued} · 忽略 {rep.ignored}")
+    print(f"  分类 {rep.classified} · 自动写入 {rep.auto_applied}（其中新建投递 {rep.created}）"
+          f" · 要你判断 {rep.queued} · 打算丢掉、等你确认 {rep.filtered + rep.ignored}"
+          f"（预过滤判无关 {rep.filtered}，分类器判无关 {rep.ignored}）")
+    if rep.learned:
+        _ok(f"记下了 {len(rep.learned)} 个验过 DMARC 的公司发件域名：{', '.join(rep.learned)}")
     for e in rep.errors:
         _warn(e)
     if rep.alerts:
@@ -1129,8 +1136,88 @@ def cmd_mail_sweep(args: argparse.Namespace) -> int:
                 _err(f"推送失败：{res.detail}")
                 return 1
             _ok("已推送到 Discord")
-    if rep.queued:
+    if rep.queued or rep.filtered or rep.ignored:
         print("\n  看队列：agent mail queue")
+    return 0
+
+
+def cmd_mail_verify_senders(args: argparse.Namespace) -> int:
+    from .mail import pipeline as mp
+    from .mail.imap import MailError, MailReader
+
+    conn = db.connect()
+    db.init_db(conn)
+    try:
+        out = mp.verify_senders(conn, MailReader())
+    except MailError as exc:
+        _err(str(exc))
+        return 1
+    finally:
+        conn.close()
+    _ok(f"补查了 {out['checked']} 封邮件的 DMARC（只取邮件头）"
+        + (f"，{out['unreachable']} 封取不回来（邮箱里删了，或 UIDVALIDITY 变了）" if out["unreachable"] else ""))
+    print("  " + " · ".join(f"{k} {v}" for k, v in sorted(out["dmarc"].items(), key=lambda kv: -kv[1])))
+    if out["learned"]:
+        _ok(f"记下了 {len(out['learned'])} 个公司发件域名：{', '.join(out['learned'])}")
+    else:
+        print("  没有新的公司域名可记")
+    return 0
+
+
+def _pct(n: int, d: int) -> str:
+    return f"{n / d:.0%}" if d else "—"
+
+
+def _cols(cells: Sequence[Any], widths: Sequence[int]) -> str:
+    """按终端显示宽度对齐（中文占两格）：第一列靠左，其余靠右。"""
+    import unicodedata
+
+    out = []
+    for i, (c, w) in enumerate(zip(cells, widths)):
+        s = str(c)
+        pad = " " * max(0, w - sum(2 if unicodedata.east_asian_width(ch) in "WF" else 1 for ch in s))
+        out.append(s + pad if i == 0 else pad + s)
+    return "".join(out)
+
+
+def cmd_funnel(args: argparse.Namespace) -> int:
+    from . import tracking
+    from .status import FUNNEL
+
+    conn = db.connect()
+    db.init_db(conn)
+    rows = tracking.tracking_rows(conn)
+    conn.close()
+    if args.since:
+        rows = [r for r in rows if (r.started_at or "")[:10] >= args.since]
+    if not rows:
+        _warn("没有投递记录")
+        return 0
+
+    total = tracking.funnel(rows)[0]
+    widths = (12, 6, 8, 10)
+    print(_cols(("阶段", "到达", "占投递", "比上一级"), widths))
+    for i, name in enumerate(FUNNEL):
+        n = total.reached[i]
+        prev = _pct(n, total.reached[i - 1]) if i else ""
+        print(_cols((name, n, _pct(n, total.total), prev), widths))
+    print()
+    print(f"确认收到 {total.confirmed}/{total.total}（{_pct(total.confirmed, total.total)}）"
+          f" · OA {total.oa} 个，其中进面试 {total.oa_to_interview}（{_pct(total.oa_to_interview, total.oa)}）")
+    print("结果：" + " · ".join(f"{k} {v}" for k, v in sorted(total.outcomes.items(), key=lambda kv: -kv[1])))
+    if total.rejected_at:
+        print("被拒在：" + " · ".join(f"{k} {v}" for k, v in total.rejected_at.items()))
+
+    if args.by:
+        print()
+        print(f"按 {args.by} 分组：")
+        widths = (24, 6, 10, 8, 7, 6, 8)
+        print("  " + _cols(("分组", "投递", "过简历关", "面试", "offer", "被拒", "无回音"), widths))
+        for g in tracking.funnel(rows, by=args.by):
+            print("  " + _cols((g.label[:20], g.total, _pct(g.reached[1], g.total), _pct(g.reached[2], g.total),
+                                g.reached[5], g.outcomes.get("被拒", 0), g.outcomes.get("无回音", 0)), widths))
+    print()
+    print("面试轮数按邮件数算，提醒信被当成新一轮时会多算：agent applications rounds <id> <n> 更正")
     return 0
 
 
@@ -1220,6 +1307,10 @@ def cmd_applications(args: argparse.Namespace) -> int:
         if args.app_cmd == "dups":
             _print_dups(tracking.duplicate_candidates(conn))
             return 0
+        if args.app_cmd == "rounds":
+            tracking.set_interview_rounds(conn, args.application_id, args.rounds)
+            _ok(f"#{args.application_id} 面试轮数记为 {args.rounds}（追加了一条更正事件）")
+            return 0
         if args.app_cmd == "void":
             tracking.void_application(conn, args.application_id, reason=args.reason, undo=args.undo)
             _ok(f"#{args.application_id} 已恢复" if args.undo else
@@ -1274,14 +1365,41 @@ def cmd_companies_merge(args: argparse.Namespace) -> int:
         conn.close()
 
 
+#: 队列里每封邮件「建议怎么处理」的说法（emails.policy）
+_QUEUE_LABEL = {"queue": "要你判断", "filtered": "预过滤判无关", "ignore": "分类器判无关",
+                "record_only": "招聘方主动联系"}
+
+
+def _queue_line(r: Any) -> str:
+    return (f"  #{r['id']:<5}[{_QUEUE_LABEL.get(r['policy'], r['policy'])}] {(r['received_at'] or '')[:10]}  "
+            f"{(r['from_addr'] or '')[:38]:<40}{(r['subject'] or '')[:60]}")
+
+
 def cmd_mail_queue(args: argparse.Namespace) -> int:
+    from collections import Counter
+
     from .mail import pipeline as mp
+    from .mail.prefilter import registered_domain
 
     conn = db.connect()
     db.init_db(conn)
+    if args.kind and args.kind != "decide":
+        rows = mp.select_pending(conn, kind=args.kind)
+        conn.close()
+        if not rows:
+            _ok("没有")
+            return 0
+        for r in rows:
+            print(_queue_line(r))
+        print(f"\n共 {len(rows)} 封。看全文：agent mail show <id>")
+        print("真的丢：agent mail dismiss <id ...>，或者 --kind / --domain 挑一批")
+        print("不该丢：agent mail accept <id ...>（预过滤判无关的会先送去分类；分类器判错的加 --as <类型>）")
+        return 0
+
     rows = mp.queue_for_human(conn)
+    drops = mp.select_pending(conn, kind="drops")
     conn.close()
-    if not rows:
+    if not rows and not drops:
         _ok("人工确认队列是空的")
         return 0
     for r in rows:
@@ -1294,9 +1412,17 @@ def cmd_mail_queue(args: argparse.Namespace) -> int:
         for d in db.load_json(r["dates_json"]):
             print(f"    日期原文：「{d.get('original')}」{('— ' + d['meaning']) if d.get('meaning') else ''}")
         print(f"    为什么进队列：{r['reason']}")
-    print("\n确认：agent mail accept <id> [--application <投递id> | --create [--company 公司] [--role 岗位]]"
-          "   驳回：agent mail dismiss <id>")
-    print("看链接和全文：agent mail show <id>")
+    if rows:
+        print("\n确认：agent mail accept <id ...> [--application <投递id> | --create [--company 公司] [--role 岗位]]"
+              "   分类错了：--as <类型>   驳回：agent mail dismiss <id ...>")
+        print("批量：--type confirmation 这类条件挑一批，先列出来，加 --yes 才执行。看链接和全文：agent mail show <id>")
+    if drops:
+        kinds = Counter(_QUEUE_LABEL[r["policy"]] for r in drops)
+        domains = Counter(registered_domain(r["from_domain"] or "") or "?" for r in drops)
+        print(f"\n打算丢掉、等你确认的 {len(drops)} 封：" + " · ".join(f"{k} {v}" for k, v in kinds.items()))
+        print("  按发件域名：" + " · ".join(f"{d} {n}" for d, n in domains.most_common(8)))
+        print("  逐封看：agent mail queue --kind drops")
+        print("  批量丢：agent mail dismiss --kind drops [--domain 域名] --yes")
     return 0
 
 
@@ -1326,24 +1452,71 @@ def cmd_mail_show(args: argparse.Namespace) -> int:
     return 0
 
 
+def _pick_queue(conn: Any, args: argparse.Namespace) -> list[Any] | None:
+    """按 id 或条件从队列里挑邮件。挑了一批（多于一封、或用了条件）而没加 --yes：只列出来，返回空列表。"""
+    from .mail import pipeline as mp
+
+    if not (args.email_ids or args.kind or args.domain or args.ctype):
+        _err("给邮件 id（可以多个），或者用 --kind / --domain / --type 挑一批")
+        return None
+    rows = mp.select_pending(conn, args.email_ids, kind=args.kind, domain=args.domain, ctype=args.ctype)
+    missing = sorted(set(args.email_ids) - {r["id"] for r in rows})
+    if missing:
+        _warn("不在待确认队列里，跳过：" + "、".join(f"#{i}" for i in missing))
+    if not rows:
+        _warn("没有挑中任何邮件")
+        return []
+    if (len(rows) > 1 or args.kind or args.domain or args.ctype) and not args.yes:
+        for r in rows:
+            print(_queue_line(r))
+        _warn(f"共 {len(rows)} 封，上面只是列出来。确认无误加 --yes")
+        return []
+    return rows
+
+
 def cmd_mail_accept(args: argparse.Namespace) -> int:
+    from .agent import MissingAPIKey
     from .mail import pipeline as mp
 
     conn = db.connect()
     db.init_db(conn)
     try:
-        out = mp.accept(conn, args.email_id, application_id=args.application, create=args.create,
-                        company=args.company, role=args.role)
-    except ValueError as exc:
-        conn.close()
+        rows = _pick_queue(conn, args)
+        if rows is None:
+            return 1
+        # 预过滤判无关、还没分类过的：放行去分类（要调模型）；其余直接按建议或你的改判处理
+        unclassified = [r["id"] for r in rows if r["policy"] == "filtered" and not args.as_type]
+        failed = 0
+        for r in rows:
+            if r["id"] in unclassified:
+                continue
+            try:
+                out = mp.accept(conn, r["id"], application_id=args.application, create=args.create,
+                                company=args.company, role=args.role, as_type=args.as_type)
+            except ValueError as exc:
+                failed += 1
+                _err(str(exc))
+                continue
+            if out["event"] is None:
+                _ok(f"邮件 #{r['id']} 留着，不改任何状态")
+                continue
+            _ok(f"邮件 #{out['email_id']} → 投递 #{out['application_id']} 追加 {out['event']}，"
+                f"当前状态 {out['status']}")
+            if out["event"] in ("interview_invite", "oa_invite", "offer_received"):
+                print(f"      面试准备材料：agent prep {out['application_id']}")
+        if unclassified:
+            mp.release(conn, unclassified)
+            rep = mp.process_pending(conn, only=unclassified, limit=len(unclassified))
+            _ok(f"放行 {len(unclassified)} 封去分类：自动写入 {rep.auto_applied} · 要你判断 {rep.queued}"
+                f" · 分类器也判无关 {rep.ignored}（还在「打算丢掉」里）")
+            for e in rep.errors:
+                _warn(e)
+        return 1 if failed == len(rows) and rows else 0
+    except MissingAPIKey as exc:
         _err(str(exc))
         return 1
-    conn.close()
-    _ok(f"邮件 #{out['email_id']} → 投递 #{out['application_id']} 追加 {out['event']}，"
-        f"当前状态 {out['status']}")
-    if out["event"] in ("interview_invite", "oa_invite", "offer_received"):
-        print(f"      面试准备材料：agent prep {out['application_id']}")
-    return 0
+    finally:
+        conn.close()
 
 
 def cmd_mail_dismiss(args: argparse.Namespace) -> int:
@@ -1352,13 +1525,15 @@ def cmd_mail_dismiss(args: argparse.Namespace) -> int:
     conn = db.connect()
     db.init_db(conn)
     try:
-        mp.dismiss(conn, args.email_id, note=args.note or "")
-    except ValueError as exc:
+        rows = _pick_queue(conn, args)
+        if rows is None:
+            return 1
+        for r in rows:
+            mp.dismiss(conn, r["id"], note=args.note or "")
+    finally:
         conn.close()
-        _err(str(exc))
-        return 1
-    conn.close()
-    _ok(f"邮件 #{args.email_id} 已驳回，不改任何状态")
+    if rows:
+        _ok(("邮件 #%d 已驳回" % rows[0]["id"] if len(rows) == 1 else f"驳回了 {len(rows)} 封") + "，不改任何状态")
     return 0
 
 
@@ -1468,7 +1643,16 @@ def build_parser() -> argparse.ArgumentParser:
     avd.add_argument("application_id", type=int)
     avd.add_argument("--reason", default="")
     avd.add_argument("--undo", action="store_true")
+    ard = apsub.add_parser("rounds", help="更正面试轮数（自动按邮件数，提醒信被当成新一轮时会多算）")
+    ard.add_argument("application_id", type=int)
+    ard.add_argument("rounds", type=int)
     apps.set_defaults(func=cmd_applications)
+
+    fu = sub.add_parser("funnel", help="投递漏斗：过简历关、面试第几轮、offer 的转化率")
+    fu.add_argument("--by", choices=["month", "source", "resume", "referral"],
+                    help="分组对比：按月份、岗位来源、有没有定制简历、有没有内推")
+    fu.add_argument("--since", help="只看这天以后投的，YYYY-MM-DD")
+    fu.set_defaults(func=cmd_funnel)
 
     st = sub.add_parser("status", help="投递状态")
     stsub = st.add_subparsers(dest="sub", required=True)
@@ -1538,9 +1722,15 @@ def build_parser() -> argparse.ArgumentParser:
     msw.add_argument("--no-fetch", action="store_true", help="不拉新邮件，只处理库里还没处理的")
     msw.add_argument("--requeue", action="store_true",
                      help="把还在人工队列里的邮件按现在的规则重新处理（确认过、驳回过的不动）")
+    msw.add_argument("--rescreen", action="store_true",
+                     help="预过滤规则改了之后：以前被它丢掉、现在能过的邮件放回去分类")
     msw.add_argument("--push-alerts", action="store_true",
                      help="有面试邀请 / OA / offer 时推到 Discord。确定性推送，不经过模型；给定时任务用")
     msw.set_defaults(func=cmd_mail_sweep)
+    mlsub.add_parser(
+        "verify-senders",
+        help="给已存的邮件补查 DMARC（只取邮件头），把验证过的公司发件域名记进 companies",
+    ).set_defaults(func=cmd_mail_verify_senders)
 
     rm = sub.add_parser("remind", help="待办提醒：没做完、没过期的 OA / 面试等，按截止时间排，推到 Discord")
     rm.add_argument("--no-push", action="store_true", help="只在终端打印，不推送")
@@ -1548,19 +1738,33 @@ def build_parser() -> argparse.ArgumentParser:
     rmsub = rm.add_subparsers(dest="remind_cmd")
     rmd = rmsub.add_parser("done", help="标记一件待办做完了（同一条投递的同类邮件一起标）")
     rmd.add_argument("email_id", type=int)
-    mlsub.add_parser("queue", help="人工确认队列").set_defaults(func=cmd_mail_queue)
+    queue_kinds = ["decide", "drops", "filtered", "other", "outreach"]
+    kind_help = ("decide 要你判断的 / drops 打算丢掉的全部 / filtered 预过滤判无关 / "
+                 "other 分类器判无关 / outreach 招聘方主动联系")
+
+    def batch_args(p: argparse.ArgumentParser) -> None:
+        p.add_argument("email_ids", type=int, nargs="*", help="邮件 id，可以给多个")
+        p.add_argument("--kind", choices=queue_kinds, help="批量挑：" + kind_help)
+        p.add_argument("--domain", help="批量挑：只要这个发件域名的（比如 linkedin.com）")
+        p.add_argument("--type", dest="ctype", help="批量挑：只要这个分类的（比如 confirmation）")
+        p.add_argument("--yes", action="store_true", help="批量操作默认只列出来，加 --yes 才执行")
+
+    mq = mlsub.add_parser("queue", help="人工确认队列：要你判断的，加上「打算丢掉」等你确认的")
+    mq.add_argument("--kind", choices=queue_kinds, help="逐封列出某一类：" + kind_help)
+    mq.set_defaults(func=cmd_mail_queue)
     msh = mlsub.add_parser("show", help="看一封邮件的全文和链接")
     msh.add_argument("email_id", type=int)
     msh.set_defaults(func=cmd_mail_show)
-    mac = mlsub.add_parser("accept", help="确认队列里的一封（面试邀请等只有你能确认）")
-    mac.add_argument("email_id", type=int)
+    mac = mlsub.add_parser("accept", help="确认队列里的邮件（面试邀请等只有你能确认）；可以批量")
+    batch_args(mac)
+    mac.add_argument("--as", dest="as_type", help="分类器判错了：改判成这个类型（比如 rejection）")
     mac.add_argument("--application", type=int, help="没匹配上时手动指定投递 id")
     mac.add_argument("--create", action="store_true", help="表里没有这条投递：按邮件新建一条")
     mac.add_argument("--company", help="配合 --create：公司名（默认取分类器从邮件里抽的）")
     mac.add_argument("--role", help="配合 --create：岗位名（默认取分类器从邮件里抽的）")
     mac.set_defaults(func=cmd_mail_accept)
-    mdi = mlsub.add_parser("dismiss", help="驳回队列里的一封")
-    mdi.add_argument("email_id", type=int)
+    mdi = mlsub.add_parser("dismiss", help="驳回队列里的邮件，「打算丢掉」的就是真的丢；可以批量")
+    batch_args(mdi)
     mdi.add_argument("--note")
     mdi.set_defaults(func=cmd_mail_dismiss)
 

@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+import email.utils
 import re
 import sqlite3
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from typing import Any, Iterable
 from urllib.parse import urlsplit
 
 from .. import db
+from ..filters import _pattern
 
 SHARED_ATS_DOMAINS: frozenset[str] = frozenset({
     "greenhouse-mail.io", "greenhouse.io", "hire.lever.co", "lever.co", "ashbyhq.com",
@@ -47,6 +49,19 @@ JOB_BOARD_DOMAINS: frozenset[str] = frozenset({
     "wellfound.com", "glassdoor.com", "ziprecruiter.com", "ycombinator.com",
 })
 
+#: 个人邮箱。招聘方个人用它发信很常见，但它不是任何一家公司的域名
+FREE_MAIL_DOMAINS: frozenset[str] = frozenset({
+    "gmail.com", "googlemail.com", "outlook.com", "hotmail.com", "live.com", "msn.com", "yahoo.com",
+    "icloud.com", "me.com", "aol.com", "proton.me", "protonmail.com", "qq.com", "163.com", "126.com",
+})
+
+
+def shared_sender(domain: str) -> bool:
+    """多家公司共用、或者谁都能注册的发信域名：招聘系统、求职平台、跳转服务、个人邮箱。"""
+    shared = SHARED_ATS_DOMAINS | JOB_BOARD_DOMAINS | TRACKING_DOMAINS | FREE_MAIL_DOMAINS
+    return any(domain_matches(domain, d) for d in shared)
+
+
 #: co.uk、com.au 这类二级后缀：注册名在它左边
 _SECOND_LEVEL = frozenset({"co", "com", "org", "net", "ac", "gov", "edu"})
 
@@ -55,6 +70,9 @@ _CORP_WORDS = frozenset({
     "the", "inc", "llc", "ltd", "corp", "corporation", "co", "company", "group", "gmbh", "plc",
     "lp", "llp",
 })
+
+#: 首字母缩写里不算的虚词（Massachusetts Institute of Technology → mit）
+_STOP_WORDS = frozenset({"of", "and", "for", "at", "in", "on"})
 
 
 def domain_belongs_to(sender_domain: str, company: str) -> bool:
@@ -65,7 +83,8 @@ def domain_belongs_to(sender_domain: str, company: str) -> bool:
 
     只比**注册名**（顶级域名左边那一段：careerhub.newyorklife.com 的 newyorklife）。子域名谁都能起——
     拥有 evil.io 的人可以发自 stripe.com.evil.io。
-    而且只认**完全相等**：注册名 = 公司名去掉空格标点后的前几个词连起来。
+    而且只认**完全相等**：注册名 = 公司名去掉空格标点后的前几个词连起来，
+    或者是公司名的首字母缩写（hpe.com ↔ Hewlett Packard Enterprise、bah.com ↔ Booz Allen Hamilton，至少三个字母）。
     stripe-careers.com、stripecareers.com 冒充 Stripe 都对不上——钓鱼域名最爱在公司名后面加 careers。
     代价是 metlifecareers.com、skyworksinc.com 这类真域名也对不上，它们还是进队列。
 
@@ -75,6 +94,9 @@ def domain_belongs_to(sender_domain: str, company: str) -> bool:
     """
     words = [w for w in re.findall(r"[a-z0-9]+", (company or "").lower()) if w not in _CORP_WORDS]
     names = {"".join(words[:k]) for k in range(1, len(words) + 1)}
+    initials = "".join(w[0] for w in words if w not in _STOP_WORDS)
+    if len(initials) >= 3:
+        names.add(initials)
     label = registered_domain(sender_domain).split(".")[0]
     return len(label) >= 3 and label in names
 
@@ -101,6 +123,9 @@ TRACKING_DOMAINS: frozenset[str] = frozenset({
 
 _NOT_ACTION = re.compile(r"(?i)unsubscribe|opt-?out|preferences|privacy")
 
+#: 推送的一行放得下的长度（Discord 单条 2000 字）。点击跟踪链接常常一千多字（实测 HPE 的 SendGrid 链接 1323）
+MAX_LINK_LEN = 1900
+
 
 def link_allowed(
     url: str, *, sender_domain: str, company: str, company_domains: Iterable[str] = (),
@@ -118,7 +143,7 @@ def link_allowed(
         host = (parts.hostname or "").lower()
     except ValueError:
         return False
-    if parts.scheme not in ("http", "https") or not host or len(url) > 800 or _NOT_ACTION.search(url):
+    if parts.scheme not in ("http", "https") or not host or len(url) > MAX_LINK_LEN or _NOT_ACTION.search(url):
         return False
     platforms = SHARED_ATS_DOMAINS | JOB_BOARD_DOMAINS
     registered = {registered_domain(d) for d in company_domains if d} - {""}
@@ -135,6 +160,8 @@ SUBJECT_KEYWORDS: tuple[str, ...] = (
     "application", "applied", "applying", "interview", "assessment", "offer",
     "unfortunately", "next steps", "candidacy", "thank you for your interest",
     "coding challenge", "online assessment", "phone screen", "hackerrank", "codesignal",
+    # 实测漏掉的：HPE「Congratulations! You are invited to our screening process」
+    "screening", "invited", "invitation",
 )
 
 
@@ -145,6 +172,7 @@ class PrefilterResult:
     company_id: int | None = None
     via_ats: bool = False
     #: 发件方是谁：company（登记过的公司域名）| ats（招聘系统）| board（求职平台）| keyword（只是主题像）
+    #: | named（发件人显示名是你投过的公司）
     channel: str = ""
 
 
@@ -166,18 +194,32 @@ def domain_matches(sender: str, domain: str) -> bool:
     return bool(d) and (s == d or s.endswith("." + d))
 
 
+def company_domains(row: Any) -> list[str]:
+    """一家公司的发信域名：你登记的（email_domains）加上从验过 DMARC 的邮件学到的（verified_domains）。"""
+    return [*db.load_json(row["email_domains_json"]), *db.load_json(row["verified_domains_json"])]
+
+
 def company_domain_map(conn: sqlite3.Connection) -> dict[str, int]:
     """公司自有域名 → company_id。**共享 ATS 域名被排除在外。**"""
     out: dict[str, int] = {}
-    for r in conn.execute("SELECT id, email_domains_json FROM companies"):
-        for d in db.load_json(r["email_domains_json"]):
+    for r in conn.execute("SELECT id, email_domains_json, verified_domains_json FROM companies"):
+        for d in company_domains(r):
             d = str(d).lower().strip()
             if d and not any(domain_matches(d, s) for s in SHARED_ATS_DOMAINS):
                 out[d] = r["id"]
     return dict(sorted(out.items(), key=lambda kv: -len(kv[0])))
 
 
-def screen(email_obj: Any, domain_map: dict[str, int]) -> PrefilterResult:
+def applied_company_names(conn: sqlite3.Connection) -> list[str]:
+    """投过的公司（不算合并掉、作废的投递）。"""
+    rows = conn.execute(
+        "SELECT DISTINCT c.name FROM companies c JOIN jobs j ON j.company_id = c.id "
+        "JOIN applications a ON a.job_id = j.id WHERE a.merged_into IS NULL AND a.voided_at IS NULL"
+    )
+    return [r["name"] for r in rows if len((r["name"] or "").strip()) >= 3]
+
+
+def screen(email_obj: Any, domain_map: dict[str, int], applied_names: Iterable[str] = ()) -> PrefilterResult:
     sender = _get(email_obj, "from_domain")
     subject = _get(email_obj, "subject").lower()
 
@@ -193,4 +235,10 @@ def screen(email_obj: Any, domain_map: dict[str, int]) -> PrefilterResult:
             if board:
                 return PrefilterResult(True, f"求职平台 {board}，主题关键词：{kw}", channel="board")
             return PrefilterResult(True, f"主题关键词：{kw}", channel="keyword")
+    # 投过的公司用自己没登记的域名来信、主题又没有关键词（HPE 的筛选邀请就是这样漏的）。
+    # 显示名谁都能写——这里只决定花不花一次分类，不算可信发件方
+    display = email.utils.parseaddr(_get(email_obj, "from_addr"))[0]
+    for name in applied_names:
+        if display and _pattern(name).search(display):
+            return PrefilterResult(True, f"发件人显示名是投过的公司：{name}", channel="named")
     return PrefilterResult(False, "既不是已投公司、也不是招聘系统，主题也不像求职邮件")

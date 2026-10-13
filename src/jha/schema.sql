@@ -18,6 +18,7 @@ CREATE TABLE IF NOT EXISTS companies (
     board_token       TEXT,             -- ATS 上的板子标识；常常不等于公司名，用 resolve-ats 查
     careers_url       TEXT,
     email_domains_json TEXT NOT NULL DEFAULT '[]',   -- ["acme.com", "greenhouse-mail.io"]
+    verified_domains_json TEXT NOT NULL DEFAULT '[]', -- 从验过 DMARC 的邮件学到的公司自有发件域名；companies sync 不覆盖它
     priority          INTEGER NOT NULL DEFAULT 3,    -- 1 最高
     notes             TEXT,
     is_active         INTEGER NOT NULL DEFAULT 1,
@@ -204,6 +205,7 @@ CREATE TABLE IF NOT EXISTS emails (
     reason                TEXT,
     event_id              INTEGER,
     classifier_version    TEXT,
+    dmarc                 TEXT,        -- 收信服务器对 From 域名的 DMARC 结论：pass（且对齐）/ fail / none / unaligned / untrusted；NULL = 没查过
     created_at            TEXT    NOT NULL DEFAULT (datetime('now'))
 );
 CREATE INDEX IF NOT EXISTS idx_emails_class    ON emails(classification);

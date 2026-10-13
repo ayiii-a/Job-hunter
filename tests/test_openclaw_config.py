@@ -114,7 +114,7 @@ def test_two_chat_entries_are_refused():
     s = shipped()
     s["phone-2"] = schedules._parse_one("phone-2", {
         "task": "t", "tools": ["list_jobs"],
-        "openclaw": {"chat": "discord", "model": "claude-haiku-4-5"},
+        "openclaw": {"chat": "discord", "model": "claude-haiku-5-5"},
     })
     with pytest.raises(openclaw.ShellConfigError, match="聊天入口"):
         openclaw.generate(s, settings=settings(), discord_id=UID)

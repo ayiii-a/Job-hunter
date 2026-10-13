@@ -33,6 +33,7 @@ from typing import Any, Callable
 
 from .. import config
 from ..sources.base import html_to_text
+from .prefilter import registered_domain
 
 
 class MailError(RuntimeError):
@@ -112,6 +113,7 @@ class RawEmail:
     received_at: str         # 本地时间、无时区，见 _local_naive
     body_text: str
     links: list[str] = field(default_factory=list)
+    dmarc: str = ""          # 见 sender_auth
 
 
 #: IMAP 的日期必须是英文月份。strftime("%b") 跟随系统 locale，
@@ -163,11 +165,50 @@ def _content(part: Any) -> str:
         return payload.decode("utf-8", "replace")
 
 
+#: Authentication-Results 里注释和引号中的字发件方能影响（比如信封发件人的本地部分可以写成
+#: "dmarc=pass"），解析前先去掉
+_AUTH_NOISE = re.compile(r'\([^()]*\)|"[^"]*"')
+
+
+def _from_domain(msg: Any) -> str:
+    _, addr = email.utils.parseaddr(str(msg.get("From", "") or ""))
+    return addr.rsplit("@", 1)[-1].lower().strip() if "@" in addr else ""
+
+
+def sender_auth(msg: Any, from_domain: str) -> str:
+    """收信服务器对 From 域名的 DMARC 结论：pass / fail / none / unaligned / untrusted。
+
+    From 头谁都能写。DMARC 通过说明这封信真是从这个域名的服务器发出来的——
+    只有 pass 能拿来把域名记成「这家公司的」（pipeline.learn_sender_domain）。
+
+    只认收信服务器（IMAP_AUTHSERV_ID，默认 Gmail 的 mx.google.com）自己写的那一条：
+    这个头发件人可以预先塞一条假的，收信服务器的那条在最上面。
+    pass 还要求对齐：验的正是 From 头里这个域名（header.from），不是信封里别的域名。
+    """
+    headers = msg.get_all("Authentication-Results") or []
+    if not headers:
+        return "none"
+    parts = [p.strip() for p in _AUTH_NOISE.sub(" ", " ".join(str(headers[0]).split())).split(";")]
+    authserv = (config.env("IMAP_AUTHSERV_ID", "mx.google.com") or "mx.google.com").lower()
+    if (parts[0].split() or [""])[0].lower() != authserv:
+        return "untrusted"
+    for part in parts[1:]:
+        tokens = part.split()
+        if not tokens or not tokens[0].lower().startswith("dmarc="):
+            continue
+        result = tokens[0].split("=", 1)[1].lower() or "none"
+        if result != "pass":
+            return result
+        hf = next((t.split("=", 1)[1].lower() for t in tokens[1:] if t.lower().startswith("header.from=")), "")
+        aligned = bool(hf) and registered_domain(hf) == registered_domain(from_domain)
+        return "pass" if aligned else "unaligned"
+    return "none"
+
+
 def parse_message(raw: bytes, uid: str) -> RawEmail:
     msg = email.message_from_bytes(raw, policy=email.policy.default)
     from_hdr = str(msg.get("From", "") or "")
-    _, addr = email.utils.parseaddr(from_hdr)
-    domain = addr.rsplit("@", 1)[-1].lower().strip() if "@" in addr else ""
+    domain = _from_domain(msg)
 
     body_text, html_src = "", ""
     part = msg.get_body(preferencelist=("plain", "html"))   # 跳过附件
@@ -191,6 +232,7 @@ def parse_message(raw: bytes, uid: str) -> RawEmail:
         received_at=_local_naive(str(msg.get("Date", "") or "")),
         body_text=(body_text or "").strip(),
         links=_extract_links(body_text, html_src),
+        dmarc=sender_auth(msg, domain),
     )
 
 
@@ -221,23 +263,50 @@ class MailReader:
             )
         return ReadOnlyImap(imaplib.IMAP4_SSL(self.host, self.port))
 
-    def fetch_since(self, since: date, *, limit: int = 200) -> list[RawEmail]:
+    def _select(self, conn: ReadOnlyImap) -> str:
+        """登录、只读打开邮箱，返回 UIDVALIDITY。"""
+        if self.user and self.password:
+            conn.login(self.user, self.password)
+        typ, _ = conn.select(self.mailbox, readonly=True)
+        if typ != "OK":
+            raise MailError(f"打不开邮箱 {self.mailbox}")
+        try:
+            _, vals = conn.response("UIDVALIDITY")
+            if vals and vals[0]:
+                return vals[0].decode() if isinstance(vals[0], bytes) else str(vals[0])
+        except Exception:
+            pass
+        return "0"
+
+    def fetch_auth(self, uids: list[str]) -> dict[str, str]:
+        """给已经存下的邮件补 DMARC 结论：只取邮件头（BODY.PEEK[HEADER]），不碰正文、不改已读。
+
+        uids 是库里存的 "{UIDVALIDITY}:{UID}"。UIDVALIDITY 变过的取不回来，跳过。
+        """
         conn = self._open()
         try:
-            if self.user and self.password:
-                conn.login(self.user, self.password)
-            typ, _ = conn.select(self.mailbox, readonly=True)
-            if typ != "OK":
-                raise MailError(f"打不开邮箱 {self.mailbox}")
-
-            validity = "0"
+            validity = self._select(conn)
+            out: dict[str, str] = {}
+            for full in uids:
+                v, _, u = full.partition(":")
+                if v != validity or not u:
+                    continue
+                typ, data = conn.uid("FETCH", u, "(BODY.PEEK[HEADER])")
+                raw = next((p[1] for p in data or [] if isinstance(p, tuple) and len(p) >= 2), None)
+                if typ == "OK" and raw:
+                    msg = email.message_from_bytes(raw, policy=email.policy.default)
+                    out[full] = sender_auth(msg, _from_domain(msg))
+            return out
+        finally:
             try:
-                _, vals = conn.response("UIDVALIDITY")
-                if vals and vals[0]:
-                    validity = vals[0].decode() if isinstance(vals[0], bytes) else str(vals[0])
+                conn.logout()
             except Exception:
                 pass
 
+    def fetch_since(self, since: date, *, limit: int = 200) -> list[RawEmail]:
+        conn = self._open()
+        try:
+            validity = self._select(conn)
             typ, data = conn.uid("SEARCH", None, f"(SINCE {imap_date(since)})")
             if typ != "OK":
                 raise MailError("IMAP SEARCH 失败")

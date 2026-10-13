@@ -53,6 +53,8 @@ _ADDED_COLUMNS: tuple[tuple[str, str, str], ...] = (
     ("emails", "reason", "TEXT"),
     ("emails", "event_id", "INTEGER"),
     ("emails", "classifier_version", "TEXT"),
+    ("emails", "dmarc", "TEXT"),
+    ("companies", "verified_domains_json", "TEXT NOT NULL DEFAULT '[]'"),
 )
 
 

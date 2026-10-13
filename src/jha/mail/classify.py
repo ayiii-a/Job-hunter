@@ -18,8 +18,8 @@ from typing import Any
 from ..agent.client import AgentClient, Budget, BudgetExceeded, MissingAPIKey
 
 #: 改 prompt 或 schema 就 bump
-CLASSIFIER_VERSION = "v3"
-CLASSIFIER_MODEL = "claude-haiku-4-5"
+CLASSIFIER_VERSION = "v4"
+CLASSIFIER_MODEL = "claude-haiku-5-5"
 
 TYPES = (
     "rejection", "oa_invite", "interview_invite", "scheduling",
@@ -36,6 +36,10 @@ SCHEMA: dict[str, Any] = {
         "role_hint": {"type": "string", "description": "邮件里提到的岗位名，原文照抄；没有就留空"},
         "summary": {"type": "string", "description": "一句话：这封邮件要你做什么"},
         "action_required": {"type": "boolean"},
+        "round": {"type": "integer",
+                  "description": "面试邀请里写明的第几轮（1st round → 1、second interview → 2）；没写数字就填 0"},
+        "followup": {"type": "boolean",
+                     "description": "是不是针对已经发过的邀请的跟进：提醒、改期、确认时间、快过期、已过期。新的邀请填 false"},
         "dates": {
             "type": "array",
             "items": {
@@ -70,6 +74,9 @@ SYSTEM = """你是求职邮件分类器。判断一封邮件属于哪一类。
 - 只是加入人才库（talent community）、订阅职位提醒、创建或验证候选人账户，又没提到申请了哪个具体岗位的，
   归 other——它们不代表投了什么，判成 confirmation 会在投递表里多出一条假记录。
 - summary 用中文写。
+- round 和 followup 用来数面试走到第几轮：同一轮会有邀请、提醒、改期、确认好几封信。
+  round 只填信里写明的数字（"final round"、"onsite" 没有数字，填 0）；
+  提醒、改期、确认时间、即将过期这类跟进信 followup 填 true，新的一轮邀请填 false。
 
 日期：dates 里只抄原文，**不要换算时区，不要把 "next Tuesday" 换成具体日期**。
 

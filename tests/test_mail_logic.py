@@ -370,7 +370,7 @@ def test_uses_the_cheap_model_and_records_provenance():
     fc = FakeClassifier(lambda u: {"type": "other", "confidence": 0.5, "summary": ""})
     classify.classify_one(fc, subject="s", from_addr="a", body="b", email_id=9)
     call = fc.calls[0]
-    assert call["model"] == "claude-haiku-4-5"
+    assert call["model"] == "claude-haiku-5-5"
     assert call["purpose"] == "email_classify" and call["ref_type"] == "email" and call["ref_id"] == 9
 
 

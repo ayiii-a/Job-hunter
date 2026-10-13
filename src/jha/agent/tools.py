@@ -577,7 +577,7 @@ def list_resume_versions(
 
 @tool(
     "get_tracking",
-    "取投递追踪表：每条投递的状态、渠道、内推人、最近事件、简历版本，"
+    "取投递追踪表：每条投递的状态、漏斗进度（有没有 OA、面试第几轮、offer、结果）、渠道、内推人、最近事件、简历版本，"
     "以及**下一步该做什么**（由规则算出，不是猜的）。",
     Permission.READ,
     _obj({}),
@@ -590,6 +590,8 @@ def get_tracking(conn: sqlite3.Connection) -> dict:
         "rows": [
             {"application_id": r.application_id, "company": r.company, "title": r.title,
              "status": r.status, "applied_at": (r.applied_at or "")[:10],
+             "oa": r.progress.oa, "interview_rounds": r.progress.rounds, "offer": r.progress.offer,
+             "outcome": r.progress.outcome,
              "applied_via": r.applied_via, "referral": r.referral or None,
              "last_event": r.last_event, "verdict": r.verdict,
              "next_step": r.next_step or None}
@@ -666,8 +668,9 @@ def sweep_emails(conn: sqlite3.Connection, since_days: int = 14) -> dict:
 
 @tool(
     "list_email_queue",
-    "人工确认队列：需要用户亲自确认的邮件（面试邀请、OA、offer、匹配不上的、置信度低的）。"
-    "只给分类结果和原因，不给邮件正文。把这些列给用户，让他自己跑 agent mail accept。",
+    "人工确认队列：需要用户亲自确认的邮件（面试邀请、OA、offer、匹配不上的、置信度低的、发件域名可疑的）。"
+    "只给分类结果和原因，不给邮件正文。把这些列给用户，让他自己跑 agent mail accept。"
+    "drop_candidates 是「打算丢掉、等用户确认」的邮件数，提醒用户跑 agent mail queue --kind drops 批量看。",
     Permission.READ,
     _obj({}),
 )
@@ -675,7 +678,7 @@ def list_email_queue(conn: sqlite3.Connection) -> dict:
     from ..mail import pipeline as mail_pipeline
 
     pending = mail_pipeline.queue_for_agent(conn)
-    return {"count": len(pending), "pending": pending}
+    return {"count": len(pending), "pending": pending, "drop_candidates": mail_pipeline.drop_candidates(conn)}
 
 
 @tool(

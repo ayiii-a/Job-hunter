@@ -1,19 +1,24 @@
 """邮件测试的共享夹具：造 .eml、假 IMAP 服务器。"""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import EmailMessage
 from email.utils import format_datetime, make_msgid
 
 
 def eml(
     *, frm="Recruiting <no-reply@greenhouse-mail.io>", subject="Thanks for applying",
-    body="Hello", html=None, date=None, msgid=None, attachment=None,
+    body="Hello", html=None, date=None, msgid=None, attachment=None, dmarc="pass",
 ) -> bytes:
     m = EmailMessage()
+    if dmarc:
+        # 真实收件箱里几乎全是 pass（实测 504/505）。dmarc=None 表示没有这个头
+        domain = frm.rsplit("@", 1)[-1].rstrip(">").strip()
+        m["Authentication-Results"] = f"mx.google.com; dmarc={dmarc} header.from={domain}"
     m["From"] = frm
     m["To"] = "me@example.com"
     m["Subject"] = subject
-    m["Date"] = format_datetime(date or datetime(2026, 9, 5, 15, 0, tzinfo=timezone.utc))
+    # 默认取昨天：写死日期的话，过 30 天投递就被判成 ghosted，断言状态的测试会到期失效
+    m["Date"] = format_datetime(date or datetime.now(timezone.utc) - timedelta(days=1))
     m["Message-ID"] = msgid or make_msgid()
     m.set_content(body)
     if html:
@@ -110,7 +115,7 @@ class FakeReader:
 class FakeClassifier:
     """按邮件内容里的标记返回分类结果。记录每次收到的 user 内容。"""
 
-    model = "claude-haiku-4-5"
+    model = "claude-haiku-5-5"
 
     def __init__(self, rule):
         self.rule = rule

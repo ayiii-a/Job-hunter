@@ -33,7 +33,7 @@ TYPE_LABEL = {"oa_invite": "OA", "interview_invite": "面试", "scheduling": "�
 KIND_LABEL = {"deadline": "截止", "event": "时间", "other": "日期"}
 
 #: 抽取结果的版本。加了新字段（比如链接）就 bump，旧的待办下次提醒时重新抽
-TASK_VERSION = 2
+TASK_VERSION = 3        # v3：存模型挑的链接，推送时再过域名检查
 
 #: 给模型看的链接最多几个（签名、页脚里的链接可能很多）
 MAX_LINKS = 40
@@ -139,7 +139,7 @@ def extract_pending(
     where, params = _todo_sql(
         "AND (e.task_json IS NULL OR COALESCE(json_extract(e.task_json, '$.v'), 1) < ?)")
     rows = conn.execute(
-        "SELECT e.*, co.name AS company, co.email_domains_json AS company_domains FROM emails e "
+        "SELECT e.*, co.name AS company, co.email_domains_json, co.verified_domains_json FROM emails e "
         "LEFT JOIN applications a ON a.id = e.matched_application_id "
         "LEFT JOIN jobs j ON j.id = a.job_id LEFT JOIN companies co ON co.id = j.company_id "
         f"WHERE {where} ORDER BY e.received_at DESC LIMIT ?", (*params, TASK_VERSION, limit),
@@ -171,38 +171,35 @@ def extract_pending(
                 if item:
                     items.append(item)
         task = clean_name(data.get("task"), text, max_words=8, max_len=60)
-        kept, dropped = _pick_links(
-            data.get("links"), links, sender=r["from_domain"] or "",
-            company=r["company"] or clean_name(r["company_hint"], text, max_words=6),
-            company_domains=json.loads(r["company_domains"] or "[]"),
-        )
         conn.execute("UPDATE emails SET task_json = ? WHERE id = ?",
                      (db.dump_json({"v": TASK_VERSION, "task": task, "deadlines": items,
-                                    "links": kept, "links_dropped": dropped}), r["id"]))
+                                    "picked": _picked_urls(data.get("links"), links)}), r["id"]))
         conn.commit()
         done += 1
     return done
 
 
-def _pick_links(
-    picked: Any, links: list[str], *, sender: str, company: str, company_domains: list[str],
-) -> tuple[list[str], int]:
-    """模型只给编号，网址从邮件原文里取，再过域名检查。返回 (能推的, 挑了但没过检查的个数)。"""
-    kept: list[str] = []
-    dropped = 0
+def _picked_urls(picked: Any, links: list[str]) -> list[str]:
+    """模型只给编号，网址从邮件原文里取。最多两个。"""
+    out: list[str] = []
     for i in _as_list(picked, "links")[:2]:
         try:
             n = int(i)
         except (TypeError, ValueError):
             continue
-        if not 1 <= n <= len(links) or links[n - 1] in kept:
-            continue
-        if prefilter.link_allowed(links[n - 1], sender_domain=sender, company=company,
-                                  company_domains=company_domains):
-            kept.append(links[n - 1])
-        else:
-            dropped += 1
-    return kept, dropped
+        if 1 <= n <= len(links) and links[n - 1] not in out:
+            out.append(links[n - 1])
+    return out
+
+
+def _allowed_links(
+    urls: list[str], *, sender: str, company: str, company_domains: list[str],
+) -> tuple[list[str], int]:
+    """推送前过域名检查。每次推送时现查：公司的发件域名后来记下了，之前挡住的链接就能推。
+    返回 (能推的, 没过检查的个数)。"""
+    kept = [u for u in urls if prefilter.link_allowed(u, sender_domain=sender, company=company,
+                                                      company_domains=company_domains)]
+    return kept, len(urls) - len(kept)
 
 
 @dataclass
@@ -234,7 +231,7 @@ def pending(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ta
     where, params = _todo_sql()
     rows = conn.execute(
         "SELECT e.*, a.status AS app_status, a.voided_at AS app_voided, c.name AS company, "
-        "j.title AS job_title FROM emails e "
+        "c.email_domains_json, c.verified_domains_json, j.title AS job_title FROM emails e "
         "LEFT JOIN applications a ON a.id = e.matched_application_id "
         "LEFT JOIN jobs j ON j.id = a.job_id LEFT JOIN companies c ON c.id = j.company_id "
         f"WHERE {where} ORDER BY e.received_at", params,
@@ -258,14 +255,17 @@ def pending(conn: sqlite3.Connection, *, now: datetime | None = None) -> list[Ta
         main = [x for x in upcoming if x[1].get("kind") in ("deadline", "event")] or upcoming
         due, d = main[0] if main else (None, items[0] if items else {})
         text = f"{r['from_addr']}\n{r['subject']}\n{r['body_text']}"
+        company = r["company"] or clean_name(r["company_hint"], text, max_words=6)
+        links, links_dropped = _allowed_links(list(info.get("picked") or []), sender=r["from_domain"] or "",
+                                              company=company, company_domains=prefilter.company_domains(r))
         task = Task(
             email_ids=[r["id"]], ctype=ctype,
-            company=r["company"] or clean_name(r["company_hint"], text, max_words=6) or "?",
+            company=company or "?",
             title=r["job_title"] or "未匹配到投递",
             label=info.get("task") or "", summary=_clip(r["summary"], 120),
             due=due, due_text=d.get("text") or "", kind=d.get("kind") or "other",
             date_only=bool(d.get("date_only")), received=received,
-            links=list(info.get("links") or []), links_dropped=int(info.get("links_dropped") or 0),
+            links=links, links_dropped=links_dropped,
         )
         # 同一条投递的同类邮件（邀请、催促）合成一条，留截止时间最早的那封
         key = (r["matched_application_id"], ctype) if r["matched_application_id"] else ("email", r["id"])

@@ -102,7 +102,7 @@ schedules:
     max_llm_calls: 12
     openclaw:
       cron: "0 21 * * *"         # 每天 21:00
-      model: claude-haiku-4-5
+      model: claude-haiku-5-5
     notes: "Phase 5。只读邮箱，只自动写可纠正的事件"
 
   # ---------------------------------------------------------------------
@@ -130,7 +130,7 @@ schedules:
     max_llm_calls: 6
     openclaw:
       chat: discord
-      model: claude-haiku-4-5
+      model: claude-haiku-5-5
     notes: "OpenClaw 聊天入口，不进 cron。只读"
 
 

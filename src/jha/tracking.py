@@ -24,6 +24,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from . import config, db
+from .status import FUNNEL, ROUNDS_SET, Progress, progress
 
 #: 投出去多久没收到确认邮件就告警。
 #: 确认邮件是「申请真的进系统了」的唯一地面真相——风险表里
@@ -33,8 +34,10 @@ CONFIRM_ALERT_HOURS = 24
 #: applied 之后多久没动静就提示 follow-up
 FOLLOW_UP_DAYS = 14
 
+#: 漏斗式：每条投递一行，每个阶段一列（确认 → OA → 面试第几轮 → offer），最后是结果。
+#: 导出到 Excel 直接按这几列筛选、透视；转化率用 agent funnel 算
 COLUMNS = (
-    "公司", "岗位", "状态", "投递日", "渠道", "内推人",
+    "公司", "岗位", "投递日", "确认", "OA", "面试轮数", "offer", "结果", "渠道", "内推人",
     "最近事件", "简历版本", "匹配档位", "下一步", "最新邮件", "备注",
 )
 
@@ -55,11 +58,18 @@ class TrackingRow:
     #: 最近一封相关邮件的摘要。只给人看（board、导出）——摘要是从不可信邮件生成的，不进 agent 的上下文
     last_email: str = ""
     notes: str = ""
+    confirmed: bool = False
+    progress: Progress = field(default_factory=lambda: Progress(status=None))
+    #: 漏斗分组用：投递日（邮件建档的没有投递日，取第一条事件的时间）、岗位来源
+    started_at: str = ""
+    job_source: str = ""
 
     def as_cells(self) -> list[str]:
+        p = self.progress
         return [
-            self.company, self.title, self.status, (self.applied_at or "")[:10],
-            self.applied_via, self.referral, self.last_event,
+            self.company, self.title, (self.applied_at or self.started_at or "")[:10],
+            "✓" if self.confirmed else "", "✓" if p.oa else "", str(p.rounds) if p.rounds else "",
+            "✓" if p.offer else "", p.outcome, self.applied_via, self.referral, self.last_event,
             self.resume_version, self.verdict, self.next_step, self.last_email, self.notes,
         ]
 
@@ -125,7 +135,7 @@ def tracking_rows(conn: sqlite3.Connection, *, now: datetime | None = None) -> l
         """
         SELECT a.id, a.status, a.applied_at, a.applied_via, a.notes,
                a.confirmation_seen_at, a.resume_version_id,
-               j.title, c.name AS company,
+               j.title, j.source AS job_source, c.name AS company,
                ct.name AS referral,
                an.verdict,
                rv.page_count, rv.approved_at,
@@ -149,13 +159,19 @@ def tracking_rows(conn: sqlite3.Connection, *, now: datetime | None = None) -> l
     ).fetchall()
 
     out: list[TrackingRow] = []
+    ghost_days = config.ghost_after_days()
     for r in rows:
         resume = ""
         if r["resume_version_id"]:
             resume = f"#{r['resume_version_id']}"
             if not r["approved_at"]:
                 resume += "（未审核）"
+        events = db.load_events(conn, r["id"])
         out.append(TrackingRow(
+            confirmed=bool(r["confirmation_seen_at"]),
+            progress=progress(events, now=now, ghost_after_days=ghost_days),
+            started_at=r["applied_at"] or (events[0].occurred_at.isoformat(sep=" ") if events else ""),
+            job_source=r["job_source"] or "",
             application_id=r["id"],
             company=r["company"] or "",
             title=r["title"] or "",
@@ -177,6 +193,66 @@ def tracking_rows(conn: sqlite3.Connection, *, now: datetime | None = None) -> l
             ),
         ))
     return out
+
+
+# ---------------------------------------------------------------------------
+# 漏斗：转化率
+# ---------------------------------------------------------------------------
+
+#: agent funnel --by 的分组方式
+GROUPS = {
+    "month": lambda r: (r.started_at or "")[:7] or "日期不明",
+    "source": lambda r: {"email": "别处投的（邮件建档）", "manual": "手动添加的岗位"}.get(r.job_source, "抓取到的岗位"),
+    "resume": lambda r: "定制简历" if r.resume_version else "没有定制简历",
+    "referral": lambda r: "有内推" if (r.referral or r.applied_via == "referral") else "没有内推",
+}
+
+
+@dataclass
+class FunnelStats:
+    label: str
+    reached: list[int]                  # 和 FUNNEL 一一对应：走到过这一级的投递数
+    confirmed: int = 0
+    oa: int = 0
+    oa_to_interview: int = 0            # 做过 OA、后来进了面试的
+    outcomes: dict[str, int] = field(default_factory=dict)
+    rejected_at: dict[str, int] = field(default_factory=dict)   # 被拒的停在哪一级
+
+    @property
+    def total(self) -> int:
+        return self.reached[0]
+
+
+def funnel(rows: Iterable[TrackingRow], *, by: str | None = None) -> list[FunnelStats]:
+    """按漏斗统计。纯函数，吃 tracking_rows 的结果。by 为空就是一组「全部」。"""
+    key = GROUPS[by] if by else (lambda r: "全部")
+    groups: dict[str, list[TrackingRow]] = {}
+    for r in rows:
+        groups.setdefault(key(r), []).append(r)
+
+    out = []
+    for label in sorted(groups, reverse=(by == "month")):
+        rs = groups[label]
+        st = FunnelStats(label, [sum(1 for r in rs if r.progress.level >= i) for i in range(len(FUNNEL))])
+        for r in rs:
+            p = r.progress
+            st.confirmed += r.confirmed
+            st.oa += p.oa
+            st.oa_to_interview += p.oa and p.level >= 2
+            st.outcomes[p.outcome] = st.outcomes.get(p.outcome, 0) + 1
+            if p.outcome == "被拒":
+                at = "面试后" if p.rounds else ("OA 后" if p.oa else "简历关")
+                st.rejected_at[at] = st.rejected_at.get(at, 0) + 1
+        out.append(st)
+    return out
+
+
+def set_interview_rounds(conn: sqlite3.Connection, application_id: int, rounds: int) -> int:
+    """人工更正面试轮数（自动算是按邮件数的，提醒信被当成新一轮时会多算）。追加事件，不改历史。"""
+    if not 0 <= rounds <= 10:
+        raise ValueError("轮数要在 0 到 10 之间")
+    _active_app(conn, application_id)
+    return db.append_event(conn, application_id, ROUNDS_SET, source="manual", payload={"rounds": rounds})
 
 
 # ---------------------------------------------------------------------------
@@ -246,8 +322,9 @@ def record_from_email(
     """凭一封邮件给投递表补一条记录（你在 LinkedIn、公司官网等别处投的）。返回 application id。
 
     名字由调用方先过校验（mail/pipeline.py::clean_name），这里只管落库：
-      公司  按名字找，找不到就新建：不写 email_domains（域名只能来自你登记的配置，不能来自邮件），
-            is_active=0（没有 ATS 信息，不参与抓取）
+      公司  按名字找，找不到就新建，is_active=0（没有 ATS 信息，不参与抓取）。
+            不写 email_domains——那一列只来自你登记的配置；从邮件学到的发件域名另记在
+            verified_domains，而且要过 DMARC（见 mail/pipeline.py::learn_sender_domain）
       岗位  这家公司抓到过同名岗位就挂在它下面（分析、匹配档位都用得上），否则新建一条 source='email'
       投递  已经有了就直接返回。投递日只在确认信时填——别的邮件看不出你哪天投的，就不编
     """
@@ -443,8 +520,9 @@ def merge_companies(conn: sqlite3.Connection, dup_id: int, keep_id: int) -> dict
                 moved[table] = conn.execute(
                     f'UPDATE {table} SET "{fk["from"]}" = ? WHERE "{fk["from"]}" = ?', (keep_id, dup_id)
                 ).rowcount
-    domains = sorted(set(db.load_json(keep["email_domains_json"])) | set(db.load_json(dup["email_domains_json"])))
-    conn.execute("UPDATE companies SET email_domains_json = ? WHERE id = ?", (db.dump_json(domains), keep_id))
+    for col in ("email_domains_json", "verified_domains_json"):
+        domains = sorted(set(db.load_json(keep[col])) | set(db.load_json(dup[col])))
+        conn.execute(f"UPDATE companies SET {col} = ? WHERE id = ?", (db.dump_json(domains), keep_id))
     conn.execute("DELETE FROM companies WHERE id = ?", (dup_id,))
     conn.commit()
     return {"kept": keep_id, "merged": dup_id, "moved": moved}

@@ -29,7 +29,7 @@ from .filters import _first_match, _pattern
 ANALYZER_VERSION = "v1"
 
 #: 第二层用便宜模型。量最大的活，且是结构化抽取，不需要强推理。
-ANALYZER_MODEL = "claude-haiku-4-5"
+ANALYZER_MODEL = "claude-haiku-5-5"
 
 VERDICTS = ("strong_apply", "apply", "stretch", "skip")
 
@@ -288,7 +288,8 @@ def analyze_jobs(
         return []
     client = client or AgentClient()
     brief = _candidate_brief(profile.load_master_profile(), target)
-    budget = budget or Budget(max_llm_calls=max(len(jobs) + 2, 10))
+    # Haiku 5.5 开着思考，实测每个 JD 输出 1–3K token（思考算输出）；默认 6 万的上限跑不完一批 30 个
+    budget = budget or Budget(max_llm_calls=max(len(jobs) + 2, 10), max_output_tokens=6_000 * max(len(jobs), 10))
     return [
         analyze_one(conn, job, client=client, target=target, brief=brief, budget=budget)
         for job in jobs

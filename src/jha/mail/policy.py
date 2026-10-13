@@ -84,10 +84,11 @@ def decide(
     trusted_sender: bool = False, company_known: bool = False, invite_cleared: bool = False,
 ) -> Decision:
     """reason 会进 agent 看得到的队列——只能是我们自己写的字，不能拼邮件里的内容。"""
+    # 这两类不改状态，但也不悄悄丢：管线把它们放进队列，你确认了才算数（agent mail dismiss）
     if ctype == "other":
-        return Decision("ignore", None, "和求职无关")
+        return Decision("ignore", None, "分类器判断和求职无关——你确认了才真的丢")
     if ctype == "recruiter_outreach":
-        return Decision("record_only", None, "招聘方主动联系，不改任何状态")
+        return Decision("record_only", None, "招聘方主动联系，和已有投递无关，不改任何状态——你看一眼")
 
     event = STATUS_EVENT.get(ctype)
     alert = ctype in ACTION_TYPES

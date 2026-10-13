@@ -231,8 +231,24 @@ def test_picked_links_come_from_the_email_and_are_checked(conn):
          links=[TEST_LINK, "https://youtu.be/promo", "https://www.hackerrank.com/unsubscribe?u=1"])
     tasks.extract_pending(conn, client=FakeExtractor({"task": "", "deadlines": DUE, "links": [1, 2, 9]}))
     info = json.loads(conn.execute("SELECT task_json FROM emails").fetchone()[0])
-    assert info["links"] == [TEST_LINK] and info["links_dropped"] == 1, "youtu.be 没过检查；9 号不存在"
-    assert f"🔗 {TEST_LINK}" in tasks.reminder_text(tasks.pending(conn, now=NOW), now=NOW)
+    assert info["picked"] == [TEST_LINK, "https://youtu.be/promo"], "9 号不存在"
+    item = tasks.pending(conn, now=NOW)[0]
+    assert item.links == [TEST_LINK] and item.links_dropped == 1, "youtu.be 没过检查"
+    assert f"🔗 {TEST_LINK}" in tasks.reminder_text([item], now=NOW)
+
+
+def test_a_link_held_back_is_pushed_once_the_company_domain_is_known(conn):
+    """HPE 的测评链接走发件方自己的 SendGrid 跳转：发件域名认得之前不推，记下之后下一次就推。"""
+    eid = mail(conn, extracted=False, body=BODY, links=["https://u26.ct.sendgrid.net/ls/click?upn=x"])
+    conn.execute("UPDATE emails SET from_domain = 'jobalerts.careers.example-co.com' WHERE id = ?", (eid,))
+    conn.commit()
+    tasks.extract_pending(conn, client=FakeExtractor({"task": "", "deadlines": DUE, "links": [1]}))
+    assert tasks.pending(conn, now=NOW)[0].links == []
+    company_id = conn.execute("SELECT j.company_id FROM emails e JOIN applications a ON a.id = e.matched_application_id "
+                              "JOIN jobs j ON j.id = a.job_id WHERE e.id = ?", (eid,)).fetchone()[0]
+    conn.execute("""UPDATE companies SET verified_domains_json = '["example-co.com"]' WHERE id = ?""", (company_id,))
+    conn.commit()
+    assert tasks.pending(conn, now=NOW)[0].links == ["https://u26.ct.sendgrid.net/ls/click?upn=x"]
 
 
 def test_links_that_fail_the_check_leave_a_note_instead(conn):

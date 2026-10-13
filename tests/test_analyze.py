@@ -18,7 +18,7 @@ from jha.agent.client import Budget
 class FakeAnalyzer:
     """假的第二层客户端。记录收到的 user 内容，便于断言注入围栏。"""
 
-    model = "claude-haiku-4-5"
+    model = "claude-haiku-5-5"
 
     def __init__(self, payload=None):
         self.payload = payload or {

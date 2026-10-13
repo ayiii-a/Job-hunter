@@ -9,6 +9,7 @@ llm_calls 表 Phase 0 就建好了，这里只是把它用起来。
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass, field
 from typing import Any
@@ -25,11 +26,31 @@ DEFAULT_MAX_TOKENS = 4096
 #: 于是那部分调用的成本被**静默记成 $0**。分层设计里量最大的恰恰是 Haiku，
 #: 漏一个别名就等于整个第二层不计费——账面好看，实际不知道钱花在哪。
 PRICING: dict[str, tuple[float, float]] = {
-    "claude-opus-5": (15.0, 75.0),
-    "claude-sonnet-5": (3.0, 15.0),
+    "claude-opus-5": (5.0, 25.0),
+    "claude-sonnet-5": (2.0, 10.0),
+    # ponytail: 提示超过 10 万 token 时是 $0.50 / $2.50，这里的调用都是单封邮件、单个 JD，到不了
+    "claude-haiku-5-5": (0.10, 0.50),
     "claude-haiku-4-5": (1.0, 5.0),
     "claude-haiku-4-5-20251001": (1.0, 5.0),
 }
+
+
+#: 第二层里开思考的模型。思考 token 按输出计费，Haiku 5.5 的输出 $0.50 / 百万，开得起
+THINKING_MODELS = frozenset({"claude-haiku-5-5"})
+THINKING_EFFORT = "high"            # medium（Haiku 5.5 默认）实测对邮件根本不思考；high 才真的想
+THINKING_MAX_TOKENS = 16000
+
+
+def strict_schema(schema: Any) -> Any:
+    """structured outputs 要求每个 object 都写 additionalProperties: false。返回补好的副本，不改原 schema。"""
+    if isinstance(schema, dict):
+        out = {k: strict_schema(v) for k, v in schema.items()}
+        if out.get("type") == "object":
+            out["additionalProperties"] = False
+        return out
+    if isinstance(schema, list):
+        return [strict_schema(v) for v in schema]
+    return schema
 
 
 def price_of(model: str) -> tuple[float, float]:
@@ -172,17 +193,23 @@ class AgentClient:
         budget = budget or Budget()
         budget.check()
         use_model = model or self.model
+        thinks = use_model in THINKING_MODELS
+        if thinks:
+            # 强制 tool_choice 会让 Haiku 5.5 跳过思考，所以改用 JSON schema 约束输出，一样保证结构
+            shape: dict[str, Any] = {
+                "max_tokens": max(self.max_tokens, THINKING_MAX_TOKENS),   # 思考也占 max_tokens
+                "thinking": {"type": "adaptive"},
+                "output_config": {"effort": THINKING_EFFORT,
+                                  "format": {"type": "json_schema", "schema": strict_schema(schema)}},
+            }
+        else:
+            shape = {
+                "max_tokens": self.max_tokens,
+                "tools": [{"name": schema_name, "description": "按这个结构返回结果", "input_schema": schema}],
+                "tool_choice": {"type": "tool", "name": schema_name},
+            }
         resp = self._ensure().messages.create(
-            model=use_model,
-            max_tokens=self.max_tokens,
-            system=system,
-            messages=[{"role": "user", "content": user}],
-            tools=[{
-                "name": schema_name,
-                "description": "按这个结构返回结果",
-                "input_schema": schema,
-            }],
-            tool_choice={"type": "tool", "name": schema_name},
+            model=use_model, system=system, messages=[{"role": "user", "content": user}], **shape,
         )
         usage = getattr(resp, "usage", None)
         inp = getattr(usage, "input_tokens", 0) or 0
@@ -192,8 +219,19 @@ class AgentClient:
             log_call(conn, purpose=purpose, model=use_model, inp=inp, out=out,
                      cost=cost, ref_type=ref_type, ref_id=ref_id)
 
+        stop = getattr(resp, "stop_reason", None)
+        if stop == "refusal":
+            # Haiku 5.5 起有安全分类器，被拒没有服务端兜底模型——让调用方按「没结果」处理，别当成结论
+            raise ValueError("模型拒绝了这次请求（stop_reason=refusal）")
+        if stop == "max_tokens":
+            raise ValueError("输出到了 max_tokens 上限，结果不完整")
         for block in getattr(resp, "content", []) or []:
-            if getattr(block, "type", None) == "tool_use":
+            kind = getattr(block, "type", None)
+            if thinks and kind == "text":
+                data = json.loads(block.text)      # 回答前面可能有 thinking 块，按类型取
+                if isinstance(data, dict):
+                    return data
+            elif not thinks and kind == "tool_use":
                 return dict(getattr(block, "input", {}) or {})
         raise ValueError("模型没有按 schema 返回结果")
 

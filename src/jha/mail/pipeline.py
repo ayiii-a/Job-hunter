@@ -13,6 +13,11 @@
 公司名、岗位名是分类器从邮件里抽的——写进库之前过 `clean_name` 的确定性检查，
 因为它们之后会出现在推送里、出现在 agent 看得到的投递表里。
 
+## 什么都不悄悄丢
+
+预过滤判无关的、分类器判无关的、招聘方主动联系（不改状态）的，都进人工队列当「打算丢掉」的候选，
+你确认了（agent mail dismiss）才算真的丢。它们不推送、不进给 agent 的队列，只是等你批量看一眼。
+
 ## 给 agent 的东西里没有邮件原文
 
 `queue_for_agent` 和 `SweepReport.compact` 只含分类结果、置信度、匹配到的投递、
@@ -26,7 +31,7 @@ import re
 import sqlite3
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
-from typing import Any
+from typing import Any, Iterable
 
 from .. import db, tracking
 from .imap import MailReader, RawEmail
@@ -42,6 +47,7 @@ class SweepReport:
     classified: int = 0
     auto_applied: int = 0
     created: int = 0          # 其中新建了几条投递记录（表里原来没有的）
+    learned: list[str] = field(default_factory=list)   # 新记下的公司发件域名
     queued: int = 0
     ignored: int = 0
     alerts: list[dict[str, Any]] = field(default_factory=list)
@@ -49,9 +55,10 @@ class SweepReport:
 
     def compact(self) -> dict[str, Any]:
         return {
+            "drop_candidates_queued": self.filtered + self.ignored,
             "filtered_out": self.filtered, "classified": self.classified,
             "auto_applied": self.auto_applied, "records_created": self.created,
-            "queued_for_human": self.queued,
+            "queued_for_human": self.queued, "domains_learned": len(self.learned),
             "ignored": self.ignored, "alerts": self.alerts, "errors": self.errors[:5],
         }
 
@@ -68,9 +75,9 @@ def store_raw(conn: sqlite3.Connection, raw: RawEmail) -> int | None:
         return None
     cur = conn.execute(
         "INSERT OR IGNORE INTO emails (uid, message_id, from_addr, from_domain, subject, "
-        "body_text, received_at, links_json) VALUES (?,?,?,?,?,?,?,?)",
+        "body_text, received_at, links_json, dmarc) VALUES (?,?,?,?,?,?,?,?,?)",
         (raw.uid, raw.message_id or None, raw.from_addr, raw.from_domain, raw.subject,
-         raw.body_text, raw.received_at or None, db.dump_json(raw.links)),
+         raw.body_text, raw.received_at or None, db.dump_json(raw.links), raw.dmarc or None),
     )
     conn.commit()
     return int(cur.lastrowid) if cur.rowcount else None
@@ -180,27 +187,135 @@ def _write_event(
     return event_id
 
 
+def _round_info(cls: dict[str, Any]) -> dict[str, Any]:
+    """分类器给的「第几轮」「是不是跟进信」，写进事件 payload，漏斗数面试轮数用（status.interview_rounds）。"""
+    out: dict[str, Any] = {}
+    n = cls.get("round")
+    if isinstance(n, int) and not isinstance(n, bool) and 1 <= n <= 10:
+        out["round"] = n
+    if cls.get("followup") is True:
+        out["followup"] = True
+    return out
+
+
+def learn_sender_domain(
+    conn: sqlite3.Connection, row: sqlite3.Row, application_id: int | None, *, confirmed_by_human: bool = False,
+) -> str:
+    """把验证过的公司自有发件域名记进这家公司（companies.verified_domains）。返回记下的域名，没记就是空串。
+
+    记下之后，这个域名的来信直接认作这家公司、算可信发件方——所以条件要严，全部满足才记：
+      1. 收信服务器验过 DMARC，而且验的就是 From 里这个域名（emails.dmarc = 'pass'）——From 头谁都能写。
+         你在队列里亲手确认过的那封例外：只要不是明确验失败（fail）就记
+      2. 不是多家共用、谁都能注册的域名：招聘系统、求职平台、跳转服务、个人邮箱
+      3. 域名就是这家公司的：注册名对得上公司名或它的首字母缩写（prefilter.domain_belongs_to）；
+         或者是你在人工队列里亲手确认过的这封信（bah.com ↔ Booz Allen 这种名字对不上的，靠这条）
+      4. 没被别的公司占着
+    记的是注册域名（careers.acme.com → acme.com）：同一家公司的子域名都算它的。
+    """
+    dmarc = row["dmarc"] or ""
+    if not application_id or (dmarc != "pass" and not (confirmed_by_human and dmarc != "fail")):
+        return ""
+    domain = prefilter.registered_domain(row["from_domain"] or "")
+    if not domain or prefilter.shared_sender(domain):
+        return ""
+    co = conn.execute(
+        "SELECT c.* FROM applications a JOIN jobs j ON j.id = a.job_id JOIN companies c ON c.id = j.company_id "
+        "WHERE a.id = ?", (application_id,),
+    ).fetchone()
+    if co is None or not (confirmed_by_human or prefilter.domain_belongs_to(domain, co["name"])):
+        return ""
+    owner = next((cid for d, cid in prefilter.company_domain_map(conn).items()
+                  if prefilter.domain_matches(domain, d) or prefilter.domain_matches(d, domain)), None)
+    if owner is not None:
+        return ""                       # 已经记过（owner 是它自己），或者被别的公司占着
+    learned = [*db.load_json(co["verified_domains_json"]), domain]
+    conn.execute("UPDATE companies SET verified_domains_json = ? WHERE id = ?", (db.dump_json(learned), co["id"]))
+    conn.commit()
+    return domain
+
+
+def _new_domain_problem(
+    conn: sqlite3.Connection, row: sqlite3.Row, company_id: int | None, company_name: str,
+    domain_map: dict[str, int],
+) -> str:
+    """发件方是一个没见过的公司自有域名时，它可不可疑。返回进队列的理由；不可疑、或者不适用就是空串。
+
+    放行之后 learn_sender_domain 会把它记成这家公司的，以后这个域名的来信直接可信——所以第一次把好关：
+      - 收信服务器没验过（DMARC 没通过）
+      - 和公司名、公司名首字母缩写都对不上
+      - 和这家公司登记过的域名同名、后缀不同（stripe.com 登记过，来了个 stripe.xyz）
+    招聘系统、求职平台、个人邮箱不是哪家公司的域名，不适用。
+    理由会进 agent 看得到的队列，所以不写域名本身——那是邮件里的字。
+    """
+    domain = prefilter.registered_domain(row["from_domain"] or "")
+    if not domain or not company_name or prefilter.shared_sender(domain):
+        return ""
+    if any(prefilter.domain_matches(domain, d) or prefilter.domain_matches(d, domain) for d in domain_map):
+        return ""
+    if (row["dmarc"] or "") != "pass":
+        return "发件域名第一次见，收信服务器没验过它（DMARC 没通过）——可能是仿冒，你确认后再记"
+    if not prefilter.domain_belongs_to(domain, company_name):
+        return "发件域名第一次见，和公司名、公司名首字母缩写都对不上——你确认后会记下来，以后就认得了"
+    co = conn.execute("SELECT email_domains_json, verified_domains_json FROM companies WHERE id = ?",
+                      (company_id,)).fetchone() if company_id else None
+    label = domain.split(".")[0]
+    if co and any(prefilter.registered_domain(d).split(".")[0] == label for d in prefilter.company_domains(co)):
+        return "发件域名和这家公司登记过的域名同名、后缀不同——典型的仿冒手法，你确认后再记"
+    return ""
+
+
+def verify_senders(conn: sqlite3.Connection, reader: MailReader) -> dict[str, Any]:
+    """存量邮件：补查 DMARC（只取邮件头），再按 learn_sender_domain 的规则把公司域名补记进 companies。
+
+    只看已经记进投递表的邮件（自动写入、新建、或你在队列里确认过的）——这些是「验证没有问题」的。
+    """
+    rows = conn.execute("SELECT id, uid FROM emails WHERE dmarc IS NULL").fetchall()
+    results = reader.fetch_auth([r["uid"] for r in rows]) if rows else {}
+    for r in rows:
+        if r["uid"] in results:
+            conn.execute("UPDATE emails SET dmarc = ? WHERE id = ?", (results[r["uid"]], r["id"]))
+    conn.commit()
+
+    learned: list[str] = []
+    for r in conn.execute(
+        "SELECT * FROM emails WHERE dmarc = 'pass' AND matched_application_id IS NOT NULL "
+        "AND (policy IN ('auto_apply', 'create') OR review_status = 'accepted') ORDER BY received_at"
+    ).fetchall():
+        d = learn_sender_domain(conn, r, r["matched_application_id"],
+                                confirmed_by_human=r["review_status"] == "accepted")
+        if d:
+            learned.append(d)
+    tally = dict(conn.execute("SELECT COALESCE(dmarc, '没查到'), COUNT(*) FROM emails GROUP BY 1").fetchall())
+    return {"checked": len(results), "unreachable": len(rows) - len(results), "dmarc": tally, "learned": learned}
+
+
 def process_pending(
     conn: sqlite3.Connection, *, client: AgentClient | None = None,
-    budget: Budget | None = None, limit: int = 60,
+    budget: Budget | None = None, limit: int = 60, only: Iterable[int] = (),
 ) -> SweepReport:
+    """only：只处理这几封，并且跳过预过滤——你从「打算丢掉」里放行的（release）。"""
     rep = SweepReport()
-    rows = conn.execute(
-        "SELECT * FROM emails WHERE policy IS NULL ORDER BY received_at LIMIT ?", (limit,)
-    ).fetchall()
+    only = frozenset(only)
+    sql, params = "SELECT * FROM emails WHERE policy IS NULL", []
+    if only:
+        sql += f" AND id IN ({','.join('?' * len(only))})"
+        params += sorted(only)
+    rows = conn.execute(sql + " ORDER BY received_at LIMIT ?", (*params, limit)).fetchall()
     if not rows:
         return rep
 
     # 1. 确定性预过滤。没过的一次 LLM 都不花
     domain_map = prefilter.company_domain_map(conn)
+    applied = prefilter.applied_company_names(conn)
     todo: list[tuple[sqlite3.Row, prefilter.PrefilterResult]] = []
     for r in rows:
-        pre = prefilter.screen(r, domain_map)
+        pre = (prefilter.PrefilterResult(True, "你从「打算丢掉」里放行的", channel="keyword")
+               if r["id"] in only else prefilter.screen(r, domain_map, applied))
         if pre.passed:
             todo.append((r, pre))
         else:
-            conn.execute("UPDATE emails SET policy = 'filtered', reason = ? WHERE id = ?",
-                         (pre.reason, r["id"]))
+            conn.execute("UPDATE emails SET policy = 'filtered', review_status = 'pending', reason = ? "
+                         "WHERE id = ?", (pre.reason + "——你确认了才真的丢", r["id"]))
             rep.filtered += 1
     conn.commit()
     if not todo:
@@ -208,7 +323,8 @@ def process_pending(
 
     client = client or AgentClient()
     # 每封最多两次调用：分类 + 可能的拒信复核
-    budget = budget or Budget(max_llm_calls=2 * len(todo) + 2)
+    # 开着思考，实测每封分类输出 100–800 token
+    budget = budget or Budget(max_llm_calls=2 * len(todo) + 2, max_output_tokens=3_000 * (len(todo) + 1))
 
     for r, pre in todo:
         subject, body, sender = r["subject"] or "", r["body_text"] or "", r["from_addr"] or ""
@@ -242,6 +358,16 @@ def process_pending(
                           match_status=m.status, text=f"{subject}\n{body}",
                           trusted_sender=trusted, company_known=bool(m.company_id or company),
                           invite_cleared=cleared)
+        if cls.get("error"):
+            # 没分出来（接口出错、模型拒绝）不等于「和求职无关」——判成 other 就会被忽略、再也不看。
+            # 放进队列，你看一眼，或者 --requeue 重跑
+            d = policy.Decision("queue", None, "没分类成功（接口出错或模型拒绝）——agent mail sweep --requeue 重跑，"
+                                "或者 agent mail show 看原文")
+        elif d.action in ("auto_apply", "create"):
+            # 放行之后会把发件域名记成这家公司的（以后直接可信），所以没见过的域名第一次要把好关
+            problem = _new_domain_problem(conn, r, m.company_id, named, domain_map)
+            if problem:
+                d = policy.Decision("queue", d.event_type, problem, alert=d.alert)
 
         app_id = m.application_id
         if d.action == "create":
@@ -255,9 +381,13 @@ def process_pending(
         event_id = None
         if d.action in ("auto_apply", "create") and d.event_type and app_id:
             event_id = _write_event(conn, r, app_id, cls["type"], d.event_type, source="email",
-                                    payload={"email_id": r["id"], "confidence": cls["confidence"]})
+                                    payload={"email_id": r["id"], "confidence": cls["confidence"],
+                                             **_round_info(cls)})
             tracking.fill_unknown_role(conn, app_id, role)
             rep.auto_applied += 1
+            learned = learn_sender_domain(conn, r, app_id)
+            if learned:
+                rep.learned.append(learned)
         elif d.action == "queue":
             rep.queued += 1
         else:
@@ -269,7 +399,7 @@ def process_pending(
             "review_status=?, reason=?, event_id=?, classifier_version=? WHERE id=?",
             (cls["type"], cls["confidence"], cls.get("role_hint"), cls.get("company"), cls.get("summary"),
              db.dump_json(cls.get("dates") or []), 1 if cls.get("action_required") else 0,
-             app_id, d.action, "pending" if d.action == "queue" else None,
+             app_id, d.action, "pending" if d.action in ("queue", *DROP_POLICIES) else None,
              d.reason + (f"；{m.reason}" if m.reason else ""), event_id,
              classify.CLASSIFIER_VERSION, r["id"]),
         )
@@ -312,42 +442,109 @@ def _compact(conn: sqlite3.Connection, email_id: int) -> dict[str, Any]:
     return _row_for_agent(r) if r else {"email_id": email_id}
 
 
+#: 「打算丢掉」的建议：预过滤判无关、分类器判无关、招聘方主动联系（不改状态）。你确认了才算数
+DROP_POLICIES = ("filtered", "ignore", "record_only")
+
+#: agent mail queue / accept / dismiss 的 --kind
+KINDS: dict[str, tuple[str, ...]] = {
+    "decide": ("queue",), "drops": DROP_POLICIES,
+    "filtered": ("filtered",), "other": ("ignore",), "outreach": ("record_only",),
+}
+
+
 def queue_for_agent(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+    """只给要判断的。「打算丢掉」的候选可能有几十封，只报个数（drop_candidates）。"""
     rows = conn.execute(
-        _QUEUE_SQL + f" WHERE e.review_status = 'pending' ORDER BY {_PRIORITY}, e.received_at"
+        _QUEUE_SQL + f" WHERE e.review_status = 'pending' AND e.policy = 'queue' "
+        f"ORDER BY {_PRIORITY}, e.received_at"
     ).fetchall()
     return [_row_for_agent(r) for r in rows]
 
 
-def queue_for_human(conn: sqlite3.Connection) -> list[sqlite3.Row]:
-    """人看的版本，带主题和摘要。只给 CLI 用。"""
+def drop_candidates(conn: sqlite3.Connection) -> int:
     return conn.execute(
-        "SELECT e.*, c.name AS company, j.title AS job_title FROM emails e "
-        "LEFT JOIN applications a ON a.id = e.matched_application_id "
-        "LEFT JOIN jobs j ON j.id = a.job_id LEFT JOIN companies c ON c.id = j.company_id "
-        f"WHERE e.review_status = 'pending' ORDER BY {_PRIORITY}, e.received_at"
-    ).fetchall()
+        "SELECT COUNT(*) FROM emails WHERE review_status = 'pending' "
+        f"AND policy IN ({','.join('?' * len(DROP_POLICIES))})", DROP_POLICIES,
+    ).fetchone()[0]
+
+
+def select_pending(
+    conn: sqlite3.Connection, ids: Iterable[int] = (), *, kind: str | None = None,
+    domain: str | None = None, ctype: str | None = None,
+) -> list[sqlite3.Row]:
+    """队列里的邮件，人看的版本（带主题和摘要，只给 CLI 用）。按 id、种类、发件域名、分类挑一批。"""
+    ids = list(ids)
+    sql = ("SELECT e.*, c.name AS company, j.title AS job_title FROM emails e "
+           "LEFT JOIN applications a ON a.id = e.matched_application_id "
+           "LEFT JOIN jobs j ON j.id = a.job_id LEFT JOIN companies c ON c.id = j.company_id "
+           "WHERE e.review_status = 'pending'")
+    params: list[Any] = []
+    if ids:
+        sql += f" AND e.id IN ({','.join('?' * len(ids))})"
+        params += ids
+    if kind:
+        policies = KINDS[kind]
+        sql += f" AND e.policy IN ({','.join('?' * len(policies))})"
+        params += policies
+    if ctype:
+        sql += " AND e.classification = ?"
+        params.append(ctype)
+    rows = conn.execute(sql + f" ORDER BY {_PRIORITY}, e.received_at", params).fetchall()
+    if domain:
+        want = prefilter.registered_domain(domain) or domain.lower()
+        rows = [r for r in rows if prefilter.registered_domain(r["from_domain"] or "") == want]
+    return rows
+
+
+def queue_for_human(conn: sqlite3.Connection) -> list[sqlite3.Row]:
+    """要你判断的那部分（不含「打算丢掉」的候选）。"""
+    return select_pending(conn, kind="decide")
+
+
+def release(conn: sqlite3.Connection, email_ids: Iterable[int]) -> list[int]:
+    """「打算丢掉」里预过滤判无关的那些，你说要留：放回待处理。调用方接着用 process_pending(only=...) 分类。"""
+    ids = [int(i) for i in email_ids]
+    conn.executemany("UPDATE emails SET policy = NULL, review_status = NULL, reason = NULL "
+                     "WHERE id = ? AND policy = 'filtered' AND review_status = 'pending'", [(i,) for i in ids])
+    conn.commit()
+    return ids
 
 
 def accept(
     conn: sqlite3.Connection, email_id: int, *, application_id: int | None = None,
     create: bool = False, company: str | None = None, role: str | None = None,
+    as_type: str | None = None,
 ) -> dict[str, Any]:
     """人工确认一封邮件的建议。**不是 agent 的工具。**
 
     没匹配到投递时：application_id 指定已有的一条；确定是新的投递就 create=True，
     公司、岗位默认取分类器从邮件里抽的（过同样的检查），也可以自己给。
+    as_type：分类器判错了，你改判（比如它判成无关的其实是拒信）。
+    「打算丢掉」的候选不改判就确认 = 留着它、不改任何状态；预过滤判无关的要先分类（release）。
     """
     row = conn.execute("SELECT * FROM emails WHERE id = ?", (email_id,)).fetchone()
     if row is None:
         raise ValueError(f"没有 id 为 {email_id} 的邮件")
     if row["review_status"] != "pending":
         raise ValueError(f"邮件 #{email_id} 不在待确认队列里（{row['review_status']}）")
+    if as_type and as_type not in classify.TYPES:
+        raise ValueError(f"不认识的类型「{as_type}」，可选：{', '.join(classify.TYPES)}")
+    if row["policy"] == "filtered" and not as_type:
+        raise ValueError(f"邮件 #{email_id} 还没分类过——先放行去分类（agent mail accept 会自动做），"
+                         "或者用 --as 直接给类型")
 
-    ctype = row["classification"] or ""
+    ctype = as_type or row["classification"] or ""
     event_type = policy.STATUS_EVENT.get(ctype)
+    if as_type:
+        conn.execute("UPDATE emails SET classification = ?, reason = COALESCE(reason, '') || ? WHERE id = ?",
+                     (as_type, f"；人工改判为 {as_type}", email_id))
     if not event_type:
-        raise ValueError(f"「{row['classification']}」类邮件没有对应的状态事件，用 dismiss")
+        if row["policy"] in DROP_POLICIES:
+            conn.execute("UPDATE emails SET review_status = 'accepted', reason = COALESCE(reason, '') || "
+                         "'；你确认留着，不改状态' WHERE id = ?", (email_id,))
+            conn.commit()
+            return {"email_id": email_id, "application_id": None, "event": None, "status": None}
+        raise ValueError(f"「{ctype}」类邮件没有对应的状态事件——要改判用 --as，不要就 dismiss")
 
     app_id = application_id or row["matched_application_id"]
     if app_id:
@@ -376,6 +573,7 @@ def accept(
 
     event_id = _write_event(conn, row, app_id, ctype, event_type, source="manual",
                             payload={"email_id": email_id, "accepted_from_queue": True})
+    learn_sender_domain(conn, row, app_id, confirmed_by_human=True)
     conn.execute("UPDATE emails SET review_status = 'accepted', matched_application_id = ?, "
                  "event_id = ? WHERE id = ?", (app_id, event_id, email_id))
     conn.commit()
@@ -394,6 +592,21 @@ def dismiss(conn: sqlite3.Connection, email_id: int, *, note: str = "") -> dict[
         raise ValueError(f"邮件 #{email_id} 不在待确认队列里")
     conn.commit()
     return {"email_id": email_id, "review_status": "dismissed"}
+
+
+def rescreen_filtered(conn: sqlite3.Connection) -> int:
+    """预过滤规则放宽之后，把以前被它丢掉、按现在的规则能过的邮件放回待处理。
+
+    被预过滤丢掉的邮件从来没分类过、也没写过任何事件——规则改了它们不会自己回来。
+    这一步只重跑确定性的预过滤，不调模型；放回去的下次 process_pending 再分类。
+    """
+    domain_map, applied = prefilter.company_domain_map(conn), prefilter.applied_company_names(conn)
+    ids = [(r["id"],) for r in conn.execute(
+               "SELECT * FROM emails WHERE policy = 'filtered' AND COALESCE(review_status, 'pending') = 'pending'")
+           if prefilter.screen(r, domain_map, applied).passed]
+    conn.executemany("UPDATE emails SET policy = NULL, review_status = NULL, reason = NULL WHERE id = ?", ids)
+    conn.commit()
+    return len(ids)
 
 
 def requeue_pending(conn: sqlite3.Connection) -> int:

@@ -299,3 +299,19 @@ def test_prep_unknown_application(conn, monkeypatch):
     monkeypatch.setattr(prep.profile, "load_master_profile", lambda: MASTER)
     with pytest.raises(ValueError):
         prep.build(conn, 999)
+
+
+def test_unclassified_mail_goes_to_the_queue_not_the_bin(conn):
+    """接口出错、Haiku 5.5 拒答：没分出来不等于「和求职无关」，判成 other 就再也没人看了。"""
+    pipeline.ingest(conn, FakeReader([raw("77:1", frm="jane@ramp.com", subject="Interview MARK_INVITE")]))
+
+    class Refuses:
+        model = "x"
+
+        def structured(self, **kw):
+            raise ValueError("模型拒绝了这次请求（stop_reason=refusal）")
+
+    rep = pipeline.process_pending(conn, client=Refuses())
+    assert rep.queued == 1 and rep.ignored == 0 and rep.errors
+    assert conn.execute("SELECT review_status FROM emails").fetchone()["review_status"] == "pending"
+    assert pipeline.requeue_pending(conn) == 1, "--requeue 能把它放回去重新分类"

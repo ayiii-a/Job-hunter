@@ -92,7 +92,7 @@ def conn():
 class Fake:
     """分类和复核各返回各的，记下每次调用用的是哪个 schema、哪个模型。"""
 
-    model = "claude-haiku-4-5"
+    model = "claude-haiku-5-5"
 
     def __init__(self, cls, review=None, review_error=None):
         self.cls, self.review, self.review_error, self.calls = cls, review, review_error, []
@@ -206,3 +206,63 @@ def test_links_on_recruiting_platforms_or_the_company_own_domain_pass(url, sende
 ])
 def test_other_links_do_not(url, sender, company):
     assert not prefilter.link_allowed(url, sender_domain=sender, company=company)
+
+
+# ---------------------------------------------------------------------------
+# 实测漏掉的：HPE 从没登记过的 jobalerts.careers.hpe.com 发来筛选邀请，主题里没有关键词表里的词
+# ---------------------------------------------------------------------------
+
+HPE = {"from_domain": "jobalerts.careers.hpe.com",
+       "from_addr": "Hewlett Packard Enterprise <recruiting@jobalerts.careers.hpe.com>"}
+
+
+def test_screening_invites_pass_the_prefilter():
+    res = prefilter.screen({**HPE, "subject": "Congratulations! You are invited to our screening process"}, {})
+    assert res.passed
+
+
+def test_mail_from_a_company_you_applied_to_passes_even_without_keywords():
+    mail = {**HPE, "subject": "A quick update from our team"}
+    assert not prefilter.screen(mail, {}).passed
+    res = prefilter.screen(mail, {}, ["Hewlett Packard Enterprise"])
+    assert res.passed and res.channel == "named"
+    assert res.channel not in pipeline.TRUSTED_CHANNELS, "显示名谁都能写：只换来一次分类，不算可信"
+
+
+def test_only_companies_with_applications_count(conn):
+    conn.execute("INSERT INTO companies (name) VALUES ('Hewlett Packard Enterprise')")   # 只在目标列表里，没投过
+    conn.commit()
+    assert prefilter.applied_company_names(conn) == ["Ramp"]
+
+
+def test_rescreen_brings_back_mail_the_old_rules_dropped(conn):
+    conn.execute("INSERT INTO companies (name) VALUES ('Hewlett Packard Enterprise')")
+    conn.execute("INSERT INTO jobs (company_id, source, external_id, title) VALUES (2, 'manual', 'h', 'AI Engineer')")
+    conn.execute("INSERT INTO applications (job_id) VALUES (2)")
+    for uid, subject in (("a", "A quick update from our team"), ("b", "Weekly newsletter")):
+        frm = HPE["from_addr"] if uid == "a" else "News <news@somewhere.com>"
+        conn.execute("INSERT INTO emails (uid, from_addr, from_domain, subject, policy, reason) "
+                     "VALUES (?, ?, ?, ?, 'filtered', 'old')", (uid, frm, frm.split("@")[1].rstrip(">"), subject))
+    conn.commit()
+    assert pipeline.rescreen_filtered(conn) == 1
+    assert [r[0] for r in conn.execute("SELECT uid FROM emails WHERE policy IS NULL")] == ["a"]
+
+
+def test_the_hpe_screening_invite_lands_on_the_application(conn):
+    conn.execute("INSERT INTO companies (name) VALUES ('Hewlett Packard Enterprise')")
+    conn.execute("INSERT INTO jobs (company_id, source, external_id, title) VALUES (2, 'email', 'h', 'AI Engineer')")
+    conn.execute("INSERT INTO applications (job_id) VALUES (2)")
+    conn.commit()
+    rep = sweep(conn, Fake({"type": "interview_invite", "company": "Hewlett Packard Enterprise"}),
+                frm=HPE["from_addr"], subject="Congratulations! You are invited to our screening process",
+                body="Hewlett Packard Enterprise invites you to complete a screening.")
+    assert rep.auto_applied == 1 and rep.alerts
+    assert conn.execute("SELECT status FROM applications WHERE id = 2").fetchone()["status"] == "interview_loop"
+
+
+def test_long_tracking_links_are_not_refused_for_their_length():
+    """实测 HPE 的 SendGrid 跟踪链接 1323 个字符，原来 800 的上限把它挡掉了。"""
+    url = "https://u26642440.ct.sendgrid.net/ls/click?upn=" + "a" * 1270
+    assert prefilter.link_allowed(url, sender_domain="jobalerts.careers.hpe.com", company="Hewlett Packard Enterprise")
+    assert not prefilter.link_allowed(url + "a" * 700, sender_domain="jobalerts.careers.hpe.com",
+                                      company="Hewlett Packard Enterprise"), "超过一条推送放得下的长度"

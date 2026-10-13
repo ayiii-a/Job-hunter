@@ -240,7 +240,7 @@ def test_budget_tracks_tokens_and_cost():
     b = B()
     b.record("claude-sonnet-5", 1_000_000, 100_000)
     assert b.calls == 1
-    assert b.cost_usd == pytest.approx(3.0 + 1.5)
+    assert b.cost_usd == pytest.approx(2.0 + 1.0)     # Sonnet 5：$2 / $10 每百万 token
 
 
 def test_every_model_in_the_selection_plan_has_a_price():
@@ -248,12 +248,16 @@ def test_every_model_in_the_selection_plan_has_a_price():
 
     查不到时 Budget.record 按 (0,0) 算，那部分调用的成本被**静默记成 $0**。
     分层设计里量最大的恰恰是 Haiku——漏一个别名就等于整个第二层不计费。
-    这个 bug 出现过一次：PRICING 里只有 claude-haiku-4-5-20251001，
-    而配置和文档用的是 claude-haiku-4-5。
+    这个 bug 出现过一次：PRICING 里只有 claude-haiku-5-5-20251001，
+    而配置和文档用的是 claude-haiku-5-5。
     """
-    from jha.agent.client import PRICING
+    from jha import analyze, tailor, why
+    from jha.agent.client import DEFAULT_MODEL, PRICING
+    from jha.mail import classify
 
-    for model in ("claude-sonnet-5", "claude-haiku-4-5", "claude-opus-5"):
+    used = (DEFAULT_MODEL, analyze.ANALYZER_MODEL, classify.CLASSIFIER_MODEL, classify.REVIEW_MODEL,
+            classify.TASK_MODEL, tailor.TAILOR_MODEL, why.WHY_MODEL)
+    for model in used:
         assert model in PRICING, f"{model} 没有价格，它的成本会被静默记成 0"
         assert all(rate > 0 for rate in PRICING[model])
 
@@ -352,3 +356,56 @@ def test_get_master_profile_bullets_expose_ids_and_evidence(conn, monkeypatch):
     assert out[0]["has_metrics"] is True
     assert out[0]["metric_evidence"] == "MAE 11.73"
     assert out[1]["has_metrics"] is False
+
+
+def test_a_refusal_is_reported_as_such():
+    from jha.agent.client import AgentClient
+
+    c = AgentClient(api_key="x")
+    c._client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: SimpleNamespace(
+        content=[], stop_reason="refusal", usage=SimpleNamespace(input_tokens=10, output_tokens=0))))
+    with pytest.raises(ValueError, match="refusal"):
+        c.structured(system="s", user="u", schema={"type": "object"}, model="claude-haiku-5-5")
+
+
+def _capturing_client(resp):
+    from jha.agent.client import AgentClient
+
+    sent = {}
+    c = AgentClient(api_key="x")
+    c._client = SimpleNamespace(messages=SimpleNamespace(create=lambda **kw: sent.update(kw) or resp))
+    return c, sent
+
+
+def test_haiku_thinks_and_answers_through_a_json_schema():
+    """强制 tool_choice 会让 Haiku 5.5 跳过思考：它走 output_config.format，回答在 thinking 块后面。"""
+    resp = SimpleNamespace(stop_reason="end_turn", usage=SimpleNamespace(input_tokens=10, output_tokens=600),
+                           content=[SimpleNamespace(type="thinking", thinking=""),
+                                    SimpleNamespace(type="text", text='{"type": "rejection"}')])
+    c, sent = _capturing_client(resp)
+    schema = {"type": "object", "properties": {"type": {"type": "string"},
+                                               "dates": {"type": "array", "items": {"type": "object", "properties": {}}}}}
+    assert c.structured(system="s", user="u", schema=schema, model="claude-haiku-5-5") == {"type": "rejection"}
+    assert sent["thinking"] == {"type": "adaptive"} and sent["output_config"]["effort"] == "high"
+    sent_schema = sent["output_config"]["format"]["schema"]
+    assert sent_schema["additionalProperties"] is False
+    assert sent_schema["properties"]["dates"]["items"]["additionalProperties"] is False, "嵌套的 object 也要"
+    assert "additionalProperties" not in schema, "不改调用方的 schema"
+    assert "tools" not in sent and "tool_choice" not in sent
+    assert sent["max_tokens"] >= 16000, "思考也占 max_tokens"
+
+
+def test_sonnet_still_uses_the_forced_tool():
+    resp = SimpleNamespace(stop_reason="tool_use", usage=SimpleNamespace(input_tokens=10, output_tokens=50),
+                           content=[SimpleNamespace(type="tool_use", input={"ok": True})])
+    c, sent = _capturing_client(resp)
+    assert c.structured(system="s", user="u", schema={"type": "object"}, model="claude-sonnet-5") == {"ok": True}
+    assert sent["tool_choice"]["type"] == "tool" and "thinking" not in sent
+
+
+def test_truncated_output_is_an_error_not_a_result():
+    resp = SimpleNamespace(stop_reason="max_tokens", usage=SimpleNamespace(input_tokens=10, output_tokens=16000),
+                           content=[SimpleNamespace(type="thinking", thinking="")])
+    c, _ = _capturing_client(resp)
+    with pytest.raises(ValueError, match="max_tokens"):
+        c.structured(system="s", user="u", schema={"type": "object"}, model="claude-haiku-5-5")

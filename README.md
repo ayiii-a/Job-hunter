@@ -42,7 +42,7 @@ Human-in-the-loop by design: data stays on your machine and every outbound actio
 | JD analysis | Assigns each posting a verdict (strong_apply / apply / stretch / skip) and extracts required skills, years of experience and gaps | `agent analyze` |
 | Resume tailoring | Selects bullets from the master resume by id, rewrites wording toward JD keywords, renders a PDF, enforces one page and checks for fabrication | `agent tailor <job_id>` |
 | Application questions | Handles form questions in three tiers; drafts "Why this company" answers per job and verifies them | `agent answers <job_id>` |
-| Application tracking | Event-sourced state machine, next-step suggestions, missing-confirmation alerts, TSV export | `agent board` |
+| Application tracking | Event-sourced state machine, funnel-style table (confirmation → OA → interview rounds → offer → outcome) with conversion rates, next-step suggestions, missing-confirmation alerts, TSV/CSV export | `agent board`, `agent funnel` |
 | Email processing | Read-only IMAP fetch; summarizes and classifies each message, updates the matching application or creates one for applications made elsewhere, and pushes anything that needs action | `agent mail sweep` |
 | Interview prep | Collects JD highlights, skill gaps, the exact resume version you sent, and referral contacts | `agent prep <application_id>` |
 | Agent loop | The model calls tools on its own to complete a task; every step is logged | `agent run "<task>"` |
@@ -197,11 +197,18 @@ Each file has a matching `*.example.yaml` that serves as the template and field 
 | `agent applied <job_id>` | Record an application you submitted yourself |
 | `agent confirm <id>` | Record that a confirmation email arrived |
 | `agent board` | Tracking board, next-step suggestions, missing-confirmation alerts |
+| `agent funnel` | Conversion funnel: applied → past resume screen (OA or interview) → interview round 1, 2, 3+ → offer, plus confirmation rate, OA-to-interview rate, outcomes and where rejections happened. `--by month\|source\|resume\|referral` compares groups; `--since YYYY-MM-DD` limits the range |
+| `agent applications rounds <id> <n>` | Correct an application's interview-round count (appends a correction event) |
 | `agent applications dups` | Suggest likely duplicates: placeholder records next to titled ones, near-identical titles, near-identical company names, and action emails not attached to any application |
 | `agent applications merge <a> <b>` | Merge two records of the same application: the duplicate's events are copied over, its emails re-pointed (so duplicate to-dos collapse into one), and it is hidden everywhere. Prints the plan; `--yes` applies — merges can't be undone |
 | `agent applications void <id>` | Mark a record as not an application (e.g. a talent-community sign-up); hidden everywhere, `--undo` restores |
-| `agent mail sweep` | Fetch and process new email (read-only). `--push-alerts` pushes messages that need action; `--requeue` re-runs messages still in the review queue under the current rules |
-| `agent mail queue` / `accept <id>` / `dismiss <id>` | Human review queue. `accept --create` records an application that isn't in the table yet (`--company` / `--role` to override the names) |
+| `agent mail sweep` | Fetch and process new email (read-only). `--push-alerts` pushes messages that need action; `--requeue` re-runs messages still in the review queue under the current rules; `--rescreen` re-checks messages the prefilter set aside after its rules change |
+| `agent mail verify-senders` | One-off backfill for email stored before sender verification existed: fetch only the headers, record the DMARC verdict, and register verified company sender domains |
+| `agent mail queue [--kind ...]` | Human review queue: items that need a decision, plus a summary of drop candidates grouped by kind and sender domain. `--kind drops` lists every drop candidate |
+| `agent mail accept <id ...>` | Accept the suggestion. `--create` records an application that isn't in the table yet (`--company` / `--role` to override the names); `--as <type>` overrides a wrong classification. On a drop candidate it means "keep this": prefilter rejects are sent to classification, the rest are kept without a status change |
+| `agent mail dismiss <id ...>` | Reject the suggestion; on a drop candidate this is the actual drop |
+
+`accept` and `dismiss` work in batches: pass several ids, or select with `--kind decide|drops|filtered|other|outreach`, `--domain linkedin.com` or `--type confirmation`. A batch is only listed until you add `--yes`.
 | `agent remind` / `remind done <email_id>` | Everything you still need to do — OAs, interviews, scheduling replies, offers — that isn't done and hasn't passed its deadline, sorted by deadline with the time left and pushed to Discord (`--no-push` prints only). `done` marks an item finished |
 
 **Agent and automation**
@@ -261,7 +268,40 @@ The mailbox is opened with `EXAMINE`, messages are fetched only with `BODY.PEEK[
 
 Classification results are routed by the cost of getting them wrong. Confirmations, rejections, interview invites and OAs update the matching application automatically, and invites and OAs also trigger a push. **Offers always go to the human review queue**: they are few, costly to get wrong, and offer scams target new grads. A rejection whose body contains scheduling language gets a second, independent review by a stronger model; it is filed only if that review finds no next step and quotes the rejection sentence verbatim — otherwise it is queued, so an invite is never filed as a rejection.
 
-Applications don't have to come from this tool. When an email matches no application — you applied on LinkedIn or a company site — a record is created, but only if the sender is trustworthy — a registered company domain, an ATS, a job board, or a domain that belongs to the company the email names (`careers.acme.com` for Acme; lookalikes such as `acme-careers.com` don't count) — and the company name actually appears in the email. The model identifies the company; deterministic code checks the sender domain against it. Company and role names taken from email pass deterministic checks (character set, length, present in the original text) before they are stored, because they later appear in pushes and in the tracking table the agent can read. Each application shows the latest email summary on `agent board` and in the export; the summary is never given to the agent.
+**Nothing is dropped silently.** Everything the pipeline would discard goes to the review queue as a *drop candidate*, and is gone only after you dismiss it:
+
+- mail the prefilter judges unrelated (still no model call);
+- mail the classifier calls unrelated;
+- recruiter outreach that changes no status.
+
+Drop candidates never trigger a push, and the agent only sees their count. Clear them in batches, by kind or by sender domain.
+
+Applications don't have to come from this tool. When an email matches no application — you applied on LinkedIn or a company site — a record is created, but only if the sender is trustworthy — a registered company domain, an ATS, a job board, or a domain that belongs to the company the email names (`careers.acme.com` for Acme, or the company's initials such as `hpe.com` for Hewlett Packard Enterprise; lookalikes such as `acme-careers.com` don't count) — and the company name actually appears in the email. The model identifies the company; deterministic code checks the sender domain against it. Company and role names taken from email pass deterministic checks (character set, length, present in the original text) before they are stored, because they later appear in pushes and in the tracking table the agent can read. Each application shows the latest email summary on `agent board` and in the export; the summary is never given to the agent.
+
+**Company sender domains are learned from verified email.** Anyone can write a From header, and a learned domain makes that sender trusted from then on. A domain is recorded on the company only when all four conditions hold:
+
+- **DMARC:** the receiving server's own `Authentication-Results` header shows a DMARC pass aligned with the From domain. Only the topmost header counts, because senders can plant fake ones below it.
+- **Not shared:** the domain is not an ATS, job board, redirect service or personal mailbox.
+- **Belongs to the company:** its registered name matches the company name or its initials (three letters or more), or you confirmed that very email in the review queue.
+- **Unclaimed:** no other company already has it.
+
+Learned domains go in a separate `verified_domains` column, which `companies sync` never overwrites.
+
+An email that would update or create a record from a sender domain seen for the first time is checked before anything is written. It goes to the queue instead — still pushed if it is an invite — in three cases:
+
+- DMARC didn't pass;
+- the domain matches neither the company name nor its initials;
+- it shares a name with a domain already registered for the company but has a different suffix (`stripe.xyz` when `stripe.com` is known).
+
+Once you accept it, the domain is learned. Action links in reminders are checked against the company's domains when the reminder is built, so a link held back earlier is pushed as soon as the domain is learned.
+
+**The tracking table is a funnel.** Each application is one row, with a column for each stage it reached: confirmation, OA, interview round count, offer, and a final outcome (in progress / rejected / ghosted / withdrawn / offer). Everything is derived from the event log, like the status.
+
+Interviews often take several rounds, and each round brings several emails (invite, reminder, reschedule, confirmation). So the classifier tags every interview email with the round number it states and whether it is a follow-up. Rounds are then counted as follows:
+
+- numbered rounds are de-duplicated;
+- each unnumbered new invite counts as one round;
+- follow-ups don't add a round.
 
 ### Resume fabrication checks
 
